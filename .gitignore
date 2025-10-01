@@ -1,0 +1,23 @@
+# logs
+*.log
+logs/
+backend.log
+
+# Node / frontend
+node_modules/
+dist/
+build/
+.vite/
+.vscode/
+
+# Python / backend
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# OS/editor
+.DS_Store
+*.swp
+.env
+.env.*

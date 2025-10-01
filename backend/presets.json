@@ -1,0 +1,53 @@
+{
+  "presets": [
+    {
+      "name": "PGN 65253 \u2013 Engine Hours (SPN 247)",
+      "pgn": 65253,
+      "id_hex": "18FEE5FF",
+      "data_hex": "A0860100FFFFFFFF",
+      "expected": "Engine Hours: 5000.0 h"
+    },
+    {
+      "name": "PGN 65262 \u2013 Temps",
+      "pgn": 65262,
+      "id_hex": "18FEEEFF",
+      "data_hex": "2241602DFFFFFFFF",
+      "expected": "Cool -6.0\u00b0C, Fuel 25.0\u00b0C, Oil 90.0\u00b0C"
+    },
+    {
+      "name": "PGN 65263 \u2013 Pressures & Coolant Level",
+      "pgn": 65263,
+      "id_hex": "18FEEFFF",
+      "data_hex": "4BFFFF64FFFF3CD5",
+      "expected": "Fuel 300 kPa, Oil 400 kPa, Coolant 120 kPa, Level 85.2%"
+    },
+    {
+      "name": "PGN 65272 \u2013 Transmission Oil",
+      "pgn": 65272,
+      "id_hex": "18FEF8FF",
+      "data_hex": "FFFFFF32002EFFFF",
+      "expected": "Press 800 kPa, Temp 95.0\u00b0C"
+    },
+    {
+      "name": "PGN 65266 \u2013 Fuel rate & Avg FE",
+      "pgn": 65266,
+      "id_hex": "18FEF2FF",
+      "data_hex": "FA00FFFF800CFFFF",
+      "expected": "12.50 L/h, 6.250 km/L"
+    },
+    {
+      "name": "PGN 65276 \u2013 Fuel Level",
+      "pgn": 65276,
+      "id_hex": "18FEFCFF",
+      "data_hex": "FFB7FFFFFFFFFFFF",
+      "expected": "Fuel Level 73.2%"
+    },
+    {
+      "name": "PGN 61443 \u2013 Engine Load",
+      "pgn": 61443,
+      "id_hex": "18F003FF",
+      "data_hex": "FFFF3EFFFFFFFFFF",
+      "expected": "Engine Load 62%"
+    }
+  ]
+}
