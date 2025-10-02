@@ -4,6 +4,23 @@ CAN Tool is a combined backend (FastAPI) + frontend (Vite/React) project for wor
 It also includes helpers for managing a CAN interface (`can0`) and running quick hardware tests.
 
 ---
+## Packaged Executable
+
+For non-technical users, you can download the prebuilt **CAN Tool** binary:
+
+- Windows: `can-tool.exe`
+- Linux: `CAN_Tool-x86_64.AppImage`
+
+### Usage
+1. Double-click the executable
+2. Your browser will open automatically to [http://127.0.0.1:8000](http://127.0.0.1:8000)
+3. Connect to your CAN interface and use the tool
+
+### Notes
+- Make sure your CAN interface drivers are installed
+- Linux users may need `can-utils` and socket permissions (see below)
+
+---
 
 ## Backend Quick Start
 
