@@ -157,16 +157,36 @@ async def send(req: SendRequest):
 
 # ----------------------------- Presets / Groups ------------------------------
 
-@app.get("/api/presets")
+@app.get('/api/presets')
 async def get_presets():
-    """
-    Read presets.json; return an empty default if file is missing.
-    """
+    # Always return *both* shapes so any frontend version works.
     try:
-        with PRESETS_PATH.open("r") as f:
-            return json.load(f)
+        with PRESETS_PATH.open('r') as f:
+            data = json.load(f)
     except FileNotFoundError:
-        return {"presets": []}
+        return {"presets": [], "frames": []}
+
+    presets = []
+    frames = []
+
+    if isinstance(data, dict):
+        if "presets" in data and isinstance(data["presets"], list):
+            presets = data["presets"]
+            # derive frames
+            frames = [
+                {"id_hex": p.get("id_hex"), "data_hex": p.get("data_hex"), "name": p.get("name")}
+                for p in presets
+                if "id_hex" in p and "data_hex" in p
+            ]
+        elif "frames" in data and isinstance(data["frames"], list):
+            frames = data["frames"]
+            # derive presets (lossy; only name/id/data)
+            presets = [
+                {"name": f.get("name"), "id_hex": f.get("id_hex"), "data_hex": f.get("data_hex")}
+                for f in frames
+                if "id_hex" in f and "data_hex" in f
+            ]
+    return {"presets": presets, "frames": frames}
 
 
 @app.post("/api/presets")

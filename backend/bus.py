@@ -5,7 +5,6 @@ import asyncio
 import time
 import threading
 import queue
-import struct
 import subprocess
 import json
 from dataclasses import dataclass
@@ -13,7 +12,7 @@ from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Optional backends
+# Optional backends (import failures are handled gracefully)
 # ──────────────────────────────────────────────────────────────────────────────
 
 # python-can (SocketCAN path)
@@ -57,7 +56,7 @@ class _SocketCANBus:
 
     Notes:
     - bitrate is NOT set by python-can for socketcan; bring the link up externally
-      (ip link set can0 up type can bitrate 250000).
+      (e.g., `ip link set can0 up type can bitrate 250000`).
     - RX runs on a lightweight thread to keep the event loop free.
     """
     def __init__(self, channel: str, bitrate: Optional[int] = None):
@@ -73,8 +72,12 @@ class _SocketCANBus:
     def open(self):
         if not HAS_PYCAN:
             raise RuntimeError("python-can not available")
-        # Will raise if the channel does not exist
-        self.bus = can.interface.Bus(channel=self.channel, bustype="socketcan")
+        # Raises if channel doesn’t exist:
+        self.bus = can.interface.Bus(
+            channel=self.channel,
+            bustype="socketcan",
+            receive_own_messages=True  # <— this is the key
+        )
         self._start_rx()
 
     def close(self):
@@ -98,7 +101,6 @@ class _SocketCANBus:
 
     def _start_rx(self):
         def loop():
-            # Tight loop with short blocking recv; yields CPU when idle
             while not self._stop.is_set():
                 try:
                     msg = self.bus.recv(0.02)  # type: ignore[attr-defined]
@@ -107,16 +109,17 @@ class _SocketCANBus:
                     ts = getattr(msg, "timestamp", time.time())
                     data = bytes(getattr(msg, "data", b"") or b"")
                     arb = int(getattr(msg, "arbitration_id", 0))
+                    frm = Frame(ts=ts, id_hex=_hex_id(arb), data=data)
                     try:
-                        self._rxq.put_nowait(Frame(ts=ts, id_hex=_hex_id(arb), data=data))
+                        self._rxq.put_nowait(frm)
                     except queue.Full:
-                        # Drop oldest if overwhelmed; keep the system responsive
+                        # Drop oldest to stay responsive under burst
                         try:
                             _ = self._rxq.get_nowait()
                         except queue.Empty:
                             pass
                         try:
-                            self._rxq.put_nowait(Frame(ts=ts, id_hex=_hex_id(arb), data=data))
+                            self._rxq.put_nowait(frm)
                         except queue.Full:
                             pass
                     self.frames_total += 1
@@ -160,7 +163,7 @@ class _IntrepidBus:
 
     @staticmethod
     def list_names() -> List[str]:
-        """Return names like ['intrepid0', 'intrepid1', ...] if library is present."""
+        """Return names like ['intrepid0', ...] if library is present."""
         if not HAS_INTREPID:
             return []
         try:
@@ -178,7 +181,7 @@ class _IntrepidBus:
         if not self.dev.is_open():
             if not self.dev.open():
                 raise RuntimeError("Failed to open Intrepid device")
-        # Optional bitrate
+        # Optional bitrate apply
         if self.bitrate:
             try:
                 settings = self.dev.get_settings()
@@ -264,7 +267,7 @@ def _list_socketcan_names() -> List[str]:
     """
     names: List[str] = []
 
-    # Preferred: use `ip` JSON output (fast on modern systems)
+    # Preferred: `ip` JSON output
     try:
         proc = subprocess.run(
             ["ip", "-details", "-json", "link", "show", "type", "can"],
@@ -281,7 +284,7 @@ def _list_socketcan_names() -> List[str]:
     except Exception:
         pass
 
-    # Fallback: /sys scan (very fast, no subprocess)
+    # Fallback: /sys scan
     try:
         for p in Path("/sys/class/net").glob("*"):
             n = p.name
@@ -301,17 +304,17 @@ def _list_socketcan_names() -> List[str]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Front-end facing manager
+# Front-end facing manager (fixed deadlock + offloaded blocking calls)
 # ──────────────────────────────────────────────────────────────────────────────
 
 class BusManager:
     """
     Front-end facing manager that hides which backend we're using.
 
-    Design goals:
-      - No heavy work in __init__ (so app import is instant).
-      - External/hardware blocking is isolated to worker threads (see app.py).
-      - Thread-safe connect/disconnect via an asyncio.Lock.
+    Key guarantees:
+      - No heavy work in __init__ (app import is instant).
+      - All blocking device ops (.open/.close) are offloaded via asyncio.to_thread.
+      - Thread-safe connect/disconnect via an asyncio.Lock WITHOUT deadlocks.
     """
     def __init__(self):
         self._bus: Optional[object] = None
@@ -341,11 +344,13 @@ class BusManager:
         return out
 
     # ---- Connect / Disconnect ----------------------------------------------
+
     # INTERNAL: do not call without holding self._lock
     async def _disconnect_no_lock(self) -> None:
         if self._bus is not None:
             try:
-                self._bus.close()  # type: ignore[attr-defined]
+                # offload potential blocking close
+                await asyncio.to_thread(self._bus.close)  # type: ignore[attr-defined]
             except Exception:
                 pass
             self._bus = None
@@ -354,15 +359,17 @@ class BusManager:
     async def connect(self, channel: str, bitrate: Optional[int] = None) -> Tuple[bool, str]:
         """
         Connect to either SocketCAN (default) or Intrepid if channel starts with 'intrepid'.
+        Offloads hardware open to a thread to avoid blocking the event loop.
         """
         async with self._lock:
-            # IMPORTANT: call the no-lock variant to avoid deadlock
+            # FIX: avoid deadlock by calling the no-lock variant
             await self._disconnect_no_lock()
             try:
                 if channel.startswith("intrepid"):
                     idx = int(channel.replace("intrepid", "") or "0")
                     b = _IntrepidBus(device_index=idx, bitrate=bitrate)
-                    b.open()
+                    # offload blocking open
+                    await asyncio.to_thread(b.open)
                     self._bus = b
                     name = ""
                     try:
@@ -380,7 +387,8 @@ class BusManager:
                     if not HAS_PYCAN:
                         return False, "python-can not available"
                     b = _SocketCANBus(channel=channel, bitrate=bitrate)
-                    b.open()
+                    # offload blocking open
+                    await asyncio.to_thread(b.open)
                     self._bus = b
                     self._info = {
                         "driver": "socketcan",
@@ -405,6 +413,10 @@ class BusManager:
         self._bus.send(id_hex, data_hex)  # type: ignore[attr-defined]
 
     async def get_rx_batch(self, timeout: float, max_items: int) -> List[Frame]:
+        """
+        Collect up to max_items frames, waiting up to 'timeout' seconds.
+        Polls in small sleeps to hit ~50–100 Hz cadence without blocking the loop.
+        """
         end = time.time() + timeout
         items: List[Frame] = []
         while time.time() < end:
@@ -434,11 +446,17 @@ class BusManager:
         return base
 
     async def selftest(self, timeout_ms: int = 300) -> Dict[str, Any]:
+        """
+        Sends a magic frame and waits briefly to see it come back through our RX path.
+        Works out-of-the-box on vcan (loopback). On physical hardware, echo_rx may be false.
+        """
         if self._bus is None:
             return {"connected": False, "reason": "not connected"}
 
         test_id_hex = "18F11CEF"
         test_data_hex = "A55A55A55A55A55A"
+
+        # Drain any old frames quickly so we don't count stale traffic
         try:
             _ = self._bus.read_batch(10000)  # type: ignore[attr-defined]
         except Exception:
@@ -451,6 +469,7 @@ class BusManager:
         except Exception as e:
             return {"connected": True, "tx_ok": False, "error": str(e)}
 
+        # Wait briefly for echo
         deadline = time.time() + (timeout_ms / 1000.0)
         echo_rx = False
         rx_seen = 0

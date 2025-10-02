@@ -1,56 +1,95 @@
-import React, { useMemo, useState } from 'react'
+import React from "react"
 
-type Frame = { ts:number, id_hex:string, pgn?:number, sa?:number, data_hex:string, decoded?:Record<string,any>, name?:string }
+type Decoded = any // accept anything; we normalize at render time
+type Frame = {
+  time?: number | string
+  id_hex: string
+  pgn: number
+  sa: number
+  data_hex: string
+  decoded?: Decoded | null
+}
 
-export default function TrafficViewer({frames}:{frames:Frame[]}){
-  const [pgnFilter, setPgnFilter] = useState<string>('')
-  const [text, setText] = useState<string>('')
+export default function TrafficViewer({ frames }: { frames: Frame[] }) {
+  /** Render decoded in a human readable way no matter its shape */
+  const renderDecoded = (d?: Decoded | null): React.ReactNode => {
+    if (d == null) return ""
 
-  const filtered = useMemo(()=>{
-    return frames.filter(f=>{
-      if (pgnFilter){
-        if (!f.pgn || String(f.pgn) !== pgnFilter.trim()) return false
+    // If it's a string, try JSON.parse, otherwise show as-is
+    if (typeof d === "string") {
+      try {
+        const parsed = JSON.parse(d)
+        return renderDecoded(parsed)
+      } catch {
+        return d
       }
-      if (text){
-        const hay = `${f.id_hex} ${f.data_hex} ${f.name||''} ${JSON.stringify(f.decoded||{})}`.toLowerCase()
-        if (!hay.includes(text.toLowerCase())) return false
+    }
+
+    // If it's an array, render each item on its own line
+    if (Array.isArray(d)) {
+      return d.map((item, idx) => (
+        <div key={idx}>{flattenOne(item)}</div>
+      ))
+    }
+
+    // If it's an object, render key: value lines
+    if (typeof d === "object") {
+      const entries = Object.entries(d).filter(
+        ([, v]) => v !== undefined && v !== null && v !== ""
+      )
+      if (entries.length === 0) return ""
+      return entries.map(([k, v]) => (
+        <div key={k}>{k}: {flattenOne(v)}</div>
+      ))
+    }
+
+    // number/boolean/etc
+    return String(d)
+  }
+
+  /** Make a single value printable */
+  const flattenOne = (v: unknown): string => {
+    if (v == null) return ""
+    if (typeof v === "object") {
+      try {
+        return JSON.stringify(v)
+      } catch {
+        return String(v)
       }
-      return true
-    })
-  }, [frames, pgnFilter, text])
+    }
+    return String(v)
+  }
 
   return (
-    <div className="bg-white rounded-2xl shadow p-2">
-      <div className="flex items-center justify-between px-2 py-1 gap-2">
-        <div className="font-semibold">Live Traffic ({filtered.length}/{frames.length})</div>
-        <div className="flex items-center gap-2 text-sm">
-          <input placeholder="Filter PGN e.g. 65262" className="border rounded px-2 py-1" value={pgnFilter} onChange={e=>setPgnFilter(e.target.value)} />
-          <input placeholder="Search text…" className="border rounded px-2 py-1" value={text} onChange={e=>setText(e.target.value)} />
-        </div>
-      </div>
-      <div className="overflow-auto max-h-[60vh]">
-        <table className="min-w-full text-sm">
-          <thead className="sticky top-0 bg-zinc-100">
-            <tr>
-              <th className="text-left p-2">Time</th>
-              <th className="text-left p-2">ID</th>
-              <th className="text-left p-2">PGN</th>
-              <th className="text-left p-2">SA</th>
-              <th className="text-left p-2">Data</th>
-              <th className="text-left p-2">Decoded</th>
+    <div className="h-full flex flex-col">
+      <div className="text-sm font-semibold mb-2">Live Traffic ({frames.length})</div>
+
+      <div className="flex-1 overflow-auto rounded-xl border border-borderc-light dark:border-borderc-dark">
+        <table className="w-full text-sm table-fixed">
+          <thead>
+            <tr className="bg-neutral-100 dark:bg-neutral-700 text-neutral-700 dark:text-neutral-100">
+              <th className="text-left p-2 w-[120px]">Time</th>
+              <th className="text-left p-2 w-[110px]">ID</th>
+              <th className="text-left p-2 w-[80px]">PGN</th>
+              <th className="text-left p-2 w-[70px]">SA</th>
+              <th className="text-left p-2 w-[240px]">Data</th>
+              {/* Wider decoded column; wraps instead of overflowing */}
+              <th className="text-left p-2 w-[520px]">Decoded</th>
             </tr>
           </thead>
+
           <tbody>
-            {filtered.map((f,idx)=> (
-              <tr key={idx} className="odd:bg-zinc-50">
-                <td className="p-2">{typeof f.ts === 'number' ? f.ts.toFixed(3) : f.ts}</td>
+            {frames.map((f, i) => (
+              <tr key={i} className="odd:bg-neutral-50 dark:odd:bg-neutral-800">
+                <td className="p-2 font-mono tabular-nums">{f.time ?? ""}</td>
                 <td className="p-2 font-mono">{f.id_hex}</td>
-                <td className="p-2">{f.pgn}</td>
-                <td className="p-2">{f.sa}</td>
+                <td className="p-2 font-mono">{f.pgn}</td>
+                <td className="p-2 font-mono">{f.sa}</td>
                 <td className="p-2 font-mono">{f.data_hex}</td>
-                <td className="p-2">
-                  <div className="text-xs">{f.name}</div>
-                  <div className="text-xs">{f.decoded ? Object.entries(f.decoded).map(([k,v])=>`${k}: ${v}`).join(', ') : ''}</div>
+                <td className="p-2 align-top">
+                  <div className="text-xs whitespace-pre-wrap break-words">
+                    {renderDecoded(f.decoded)}
+                  </div>
                 </td>
               </tr>
             ))}
