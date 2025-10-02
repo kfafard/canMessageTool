@@ -1,17 +1,29 @@
 # backend/bus.py
 from __future__ import annotations
-import asyncio, time, threading, queue, struct
+
+import asyncio
+import time
+import threading
+import queue
+import struct
+import subprocess
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 
-# Try python-can for SocketCAN path
+# ──────────────────────────────────────────────────────────────────────────────
+# Optional backends
+# ──────────────────────────────────────────────────────────────────────────────
+
+# python-can (SocketCAN path)
 try:
     import can  # type: ignore
     HAS_PYCAN = True
 except Exception:
     HAS_PYCAN = False
 
-# Try Intrepid libicsneo path
+# Intrepid libicsneo path
 try:
     import icsneopy as ics  # type: ignore
     HAS_INTREPID = True
@@ -19,18 +31,35 @@ except Exception:
     HAS_INTREPID = False
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Common structures
+# ──────────────────────────────────────────────────────────────────────────────
+
 @dataclass
 class Frame:
     ts: float
     id_hex: str
     data: bytes
 
+
 def _hex_id(i: int) -> str:
-    # Extended IDs for J1939
+    """J1939 uses 29-bit (extended) IDs; print as 8 hex chars."""
     return f"{i:08X}"
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SocketCAN implementation via python-can
+# ──────────────────────────────────────────────────────────────────────────────
+
 class _SocketCANBus:
-    """python-can based reader/writer (SocketCAN)."""
+    """
+    python-can based reader/writer (SocketCAN).
+
+    Notes:
+    - bitrate is NOT set by python-can for socketcan; bring the link up externally
+      (ip link set can0 up type can bitrate 250000).
+    - RX runs on a lightweight thread to keep the event loop free.
+    """
     def __init__(self, channel: str, bitrate: Optional[int] = None):
         self.channel = channel
         self.bitrate = bitrate
@@ -44,8 +73,7 @@ class _SocketCANBus:
     def open(self):
         if not HAS_PYCAN:
             raise RuntimeError("python-can not available")
-        # bitrate is only used when bringing the link up externally;
-        # python-can won't set it itself for SocketCAN.
+        # Will raise if the channel does not exist
         self.bus = can.interface.Bus(channel=self.channel, bustype="socketcan")
         self._start_rx()
 
@@ -70,6 +98,7 @@ class _SocketCANBus:
 
     def _start_rx(self):
         def loop():
+            # Tight loop with short blocking recv; yields CPU when idle
             while not self._stop.is_set():
                 try:
                     msg = self.bus.recv(0.02)  # type: ignore[attr-defined]
@@ -78,7 +107,18 @@ class _SocketCANBus:
                     ts = getattr(msg, "timestamp", time.time())
                     data = bytes(getattr(msg, "data", b"") or b"")
                     arb = int(getattr(msg, "arbitration_id", 0))
-                    self._rxq.put_nowait(Frame(ts=ts, id_hex=_hex_id(arb), data=data))
+                    try:
+                        self._rxq.put_nowait(Frame(ts=ts, id_hex=_hex_id(arb), data=data))
+                    except queue.Full:
+                        # Drop oldest if overwhelmed; keep the system responsive
+                        try:
+                            _ = self._rxq.get_nowait()
+                        except queue.Empty:
+                            pass
+                        try:
+                            self._rxq.put_nowait(Frame(ts=ts, id_hex=_hex_id(arb), data=data))
+                        except queue.Full:
+                            pass
                     self.frames_total += 1
                 except Exception:
                     time.sleep(0.001)
@@ -102,6 +142,10 @@ class _SocketCANBus:
         }
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Intrepid implementation via icsneopy (libicsneo)
+# ──────────────────────────────────────────────────────────────────────────────
+
 class _IntrepidBus:
     """libicsneo wrapper with a compatible API."""
     def __init__(self, device_index: int, bitrate: Optional[int] = None):
@@ -116,9 +160,13 @@ class _IntrepidBus:
 
     @staticmethod
     def list_names() -> List[str]:
+        """Return names like ['intrepid0', 'intrepid1', ...] if library is present."""
         if not HAS_INTREPID:
             return []
-        return [f"intrepid{i}" for i, _ in enumerate(ics.find_all_devices())]
+        try:
+            return [f"intrepid{i}" for i, _ in enumerate(ics.find_all_devices())]
+        except Exception:
+            return []
 
     def open(self):
         if not HAS_INTREPID:
@@ -202,29 +250,114 @@ class _IntrepidBus:
         }
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers for SocketCAN discovery (fast & non-blocking for the API thread)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _list_socketcan_names() -> List[str]:
+    """
+    Return available SocketCAN interface names quickly.
+
+    Strategy:
+      1) Preferred: `ip -details -json link show type can` (timeout 1s)
+      2) Fallback: scan /sys/class/net for interfaces starting with can* or vcan*
+    """
+    names: List[str] = []
+
+    # Preferred: use `ip` JSON output (fast on modern systems)
+    try:
+        proc = subprocess.run(
+            ["ip", "-details", "-json", "link", "show", "type", "can"],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=True,
+        )
+        data = json.loads(proc.stdout or "[]")
+        for item in data:
+            ifname = item.get("ifname")
+            if isinstance(ifname, str):
+                names.append(ifname)
+    except Exception:
+        pass
+
+    # Fallback: /sys scan (very fast, no subprocess)
+    try:
+        for p in Path("/sys/class/net").glob("*"):
+            n = p.name
+            if n.startswith(("can", "vcan")):
+                names.append(n)
+    except Exception:
+        pass
+
+    # Deduplicate, keep order
+    seen = set()
+    uniq: List[str] = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            uniq.append(n)
+    return uniq
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Front-end facing manager
+# ──────────────────────────────────────────────────────────────────────────────
+
 class BusManager:
-    """Front-end facing manager that hides which backend we're using."""
+    """
+    Front-end facing manager that hides which backend we're using.
+
+    Design goals:
+      - No heavy work in __init__ (so app import is instant).
+      - External/hardware blocking is isolated to worker threads (see app.py).
+      - Thread-safe connect/disconnect via an asyncio.Lock.
+    """
     def __init__(self):
         self._bus: Optional[object] = None
         self._lock = asyncio.Lock()
         self._info: Dict[str, Any] = {}
 
+    # ---- Discovery -----------------------------------------------------------
+
     async def discover_interfaces(self) -> List[str]:
-        names: List[str] = []
-        # SocketCAN names (quick scan). python-can doesn't enumerate by default.
-        if HAS_PYCAN:
-            pass
-        # Intrepid names
-        if HAS_INTREPID:
+        tasks = [
+            asyncio.to_thread(_list_socketcan_names),
+            asyncio.to_thread(_IntrepidBus.list_names) if HAS_INTREPID else None,
+        ]
+        results: List[List[str]] = []
+        for t in [t for t in tasks if t is not None]:
             try:
-                names += _IntrepidBus.list_names()
+                results.append(await t)  # type: ignore[arg-type]
+            except Exception:
+                results.append([])
+        out: List[str] = []
+        seen: set[str] = set()
+        for group in results:
+            for name in group:
+                if name not in seen:
+                    seen.add(name)
+                    out.append(name)
+        return out
+
+    # ---- Connect / Disconnect ----------------------------------------------
+    # INTERNAL: do not call without holding self._lock
+    async def _disconnect_no_lock(self) -> None:
+        if self._bus is not None:
+            try:
+                self._bus.close()  # type: ignore[attr-defined]
             except Exception:
                 pass
-        return names
+            self._bus = None
+            self._info = {}
 
     async def connect(self, channel: str, bitrate: Optional[int] = None) -> Tuple[bool, str]:
+        """
+        Connect to either SocketCAN (default) or Intrepid if channel starts with 'intrepid'.
+        """
         async with self._lock:
-            await self.disconnect()
+            # IMPORTANT: call the no-lock variant to avoid deadlock
+            await self._disconnect_no_lock()
             try:
                 if channel.startswith("intrepid"):
                     idx = int(channel.replace("intrepid", "") or "0")
@@ -262,13 +395,9 @@ class BusManager:
 
     async def disconnect(self):
         async with self._lock:
-            if self._bus is not None:
-                try:
-                    self._bus.close()  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-                self._bus = None
-                self._info = {}
+            await self._disconnect_no_lock()
+
+    # ---- I/O ----------------------------------------------------------------
 
     async def send(self, id_hex: str, data_hex: str):
         if self._bus is None:
@@ -276,7 +405,6 @@ class BusManager:
         self._bus.send(id_hex, data_hex)  # type: ignore[attr-defined]
 
     async def get_rx_batch(self, timeout: float, max_items: int) -> List[Frame]:
-        # simple poll/sleep loop to roughly match 50–100 Hz batching
         end = time.time() + timeout
         items: List[Frame] = []
         while time.time() < end:
@@ -288,6 +416,8 @@ class BusManager:
                 break
             await asyncio.sleep(0.01)
         return items
+
+    # ---- Health / Self-test -------------------------------------------------
 
     def health_snapshot(self) -> Dict[str, Any]:
         if self._bus is None:
@@ -304,18 +434,11 @@ class BusManager:
         return base
 
     async def selftest(self, timeout_ms: int = 300) -> Dict[str, Any]:
-        """
-        Sends a magic frame and waits briefly to see it come back through our RX path.
-        Works out-of-the-box on vcan (loopback). On physical hardware, echo_rx may be false.
-        """
         if self._bus is None:
             return {"connected": False, "reason": "not connected"}
 
-        # Unique test ID & payload (Extended ID typical for J1939)
         test_id_hex = "18F11CEF"
         test_data_hex = "A55A55A55A55A55A"
-
-        # Drain any old frames quickly so we don't count stale traffic
         try:
             _ = self._bus.read_batch(10000)  # type: ignore[attr-defined]
         except Exception:
@@ -328,7 +451,6 @@ class BusManager:
         except Exception as e:
             return {"connected": True, "tx_ok": False, "error": str(e)}
 
-        # Wait briefly for echo
         deadline = time.time() + (timeout_ms / 1000.0)
         echo_rx = False
         rx_seen = 0
