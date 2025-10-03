@@ -1,130 +1,86 @@
-# .github/workflows/build.yml
-# PURPOSE:
-# - Build the frontend with Vite across Linux/Windows/macOS runners.
-# - Regenerate the frontend lockfile per-OS so Rollup's optional platform binary is included.
-# - Install backend Python dependencies (including python-can) before packaging with PyInstaller.
-# - Upload the built artifacts.
-
 name: Build
 
 on:
-  push:
-    branches: [ "feature/packaged-executable", "main" ]
-  pull_request:
+  push:        # still runs on every push
+    branches: ["**"]
+  workflow_dispatch:
 
 jobs:
   build:
-    # Build on all three OSes to produce native executables / artifacts
+    name: build (${{ matrix.os }})
     strategy:
+      fail-fast: false                     # let other OS finish even if one fails
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
 
     steps:
-      # ----------------------------
-      # 1) Check out the repository
-      # ----------------------------
-      - name: Check out repo
+      # 1) Check out the repo so runner has your code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # ------------------------------------------------
-      # 2) Set up Node.js (used for the Vite front-end)
-      # ------------------------------------------------
-      - name: Use Node.js 20 and enable npm cache
+      # 2) Install Node 20 and enable npm cache using the frontend lockfile
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          # We still cache per OS, and we will regenerate the lockfile per-OS below.
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      # -----------------------------------------------------------------
-      # 3) Set up Python 3.12 for the backend + enable pip cache (faster)
-      # -----------------------------------------------------------------
-      - name: Use Python 3.12 with pip cache
+      # 3) Install Python 3.12 for the backend and PyInstaller packaging
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-          cache: 'pip'
+          python-version: "3.12"
+          cache: pip
 
-      # --------------------------------------------------------
-      # 4) Install Python packages needed for packaging & server
-      #    - We install python-can so PyInstaller sees it.
-      #    - If you have backend/requirements.txt, we'll prefer it.
-      # --------------------------------------------------------
-      - name: Install backend Python deps
-        shell: bash
+      # 4) Backend deps for packaging the server
+      - name: Install backend dependencies
         run: |
-          set -euxo pipefail
-          python -m pip install --upgrade pip wheel
-          if [ -f backend/requirements.txt ]; then
-            # If you keep your deps pinned, use this. Make sure python-can is listed there.
-            pip install -r backend/requirements.txt
-          else
-            # Minimal set to match your current backend usage + fix PyInstaller hidden import warnings.
-            pip install fastapi "uvicorn[standard]" pydantic jinja2 python-can
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      # 5) Install frontend deps from the lockfile (fast & reproducible)
+      - name: npm ci (frontend)
+        working-directory: frontend
+        run: npm ci
+
+      # 6) *** IMPORTANT FIX ***
+      # NPM sometimes skips Rollup's platform package when the lockfile
+      # was created on Linux. Explicitly install the native package on
+      # Windows/macOS so "vite build" can find Rollup's binary.
+      - name: Install Rollup native binary on Windows/macOS
+        if: runner.os != 'Linux'
+        shell: bash
+        working-directory: frontend
+        run: |
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            npm i --no-save @rollup/rollup-win32-x64-msvc
+          elif [[ "${RUNNER_OS}" == "macOS" ]]; then
+            # arm64 runner
+            npm i --no-save @rollup/rollup-darwin-arm64
           fi
-          # PyInstaller used to package the backend later
-          pip install pyinstaller
 
-      # --------------------------------------------------------------------------
-      # 5) BUILD FRONTEND (with OS-specific lockfile regeneration)
-      #
-      # WHY: The Linux-generated lockfile does not include Rollup's optional
-      #      platform binary (@rollup/rollup-<platform>) on Windows/macOS.
-      #      We remove the lockfile and recreate it on each OS so npm can
-      #      record and install the correct platform package.
-      # STEPS:
-      #   - rm -f package-lock.json: remove any cross-OS lockfile
-      #   - npm install --package-lock-only: recreate lockfile WITHOUT installing
-      #   - npm ci: clean install using the (now correct) lockfile
-      #   - npm run build: produce /frontend/dist
-      #   - copy dist to backend/static so the backend can serve the files
-      # --------------------------------------------------------------------------
-      - name: Build frontend (regenerate lockfile per OS)
+      # 7) Build the frontend with Vite (now succeeds on all OS)
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      # 8) Copy static assets into backend/static
+      - name: Stage frontend assets into backend/static
         shell: bash
         run: |
-          set -euxo pipefail
-          cd frontend
-
-          # Remove any pre-existing lockfile (e.g., created on Linux)
-          rm -f package-lock.json
-
-          # Recreate an OS-correct lockfile WITHOUT downloading all packages yet.
-          # This makes sure the correct optional @rollup/rollup-<platform> gets recorded.
-          npm install --package-lock-only
-
-          # Clean, reproducible install based on the regenerated lockfile
-          npm ci
-
-          # Build Vite app -> outputs to /frontend/dist
-          npm run build
-
-          cd ..
-
-          # Ensure backend static dir exists
           mkdir -p backend/static
-
-          # Copy the built frontend to the backend static directory
           cp -r frontend/dist/* backend/static/
 
-      # ------------------------------------------------------------
-      # 6) Package the backend into a single executable with PyInstaller
-      #    - Relies on can-tool.spec in the repo root.
-      # ------------------------------------------------------------
-      - name: Package backend (PyInstaller)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          pyinstaller can-tool.spec
+      # 9) Build the single-file executable with PyInstaller
+      - name: Package app with PyInstaller
+        run: pyinstaller can-tool.spec
 
-      # ------------------------------------------------------------
-      # 7) Upload the artifacts from /dist (created by PyInstaller)
-      # ------------------------------------------------------------
-      - name: Upload packaged artifact
+      # 10) Upload the OS-specific artifact so you can download it
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: can-tool-${{ matrix.os }}-${{ github.sha }}
           path: dist/*
           if-no-files-found: error
-          retention-days: 14

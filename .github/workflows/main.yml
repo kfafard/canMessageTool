@@ -1,81 +1,73 @@
 name: Build CAN Tool
 
 on:
-  push:
-    branches:
-      - feature/packaged-executable
-  pull_request:
-    branches:
-      - feature/packaged-executable
+  push:        # still runs on every push
+    branches: ["**"]
+  workflow_dispatch:
 
 jobs:
   build:
-    name: Build ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: build (${{ matrix.os }})
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Set up Node
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
-      - name: Install frontend deps
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: npm ci (frontend)
+        working-directory: frontend
+        run: npm ci
+
+      # *** Same fix as in build.yml ***
+      - name: Install Rollup native binary on Windows/macOS
+        if: runner.os != 'Linux'
+        shell: bash
         working-directory: frontend
         run: |
-          npm ci
-          # --- Rollup native binary fix START ---
-          # Context: npm sometimes fails to install optional OS-specific Rollup
-          # binaries on Windows/macOS when using `npm ci`, which breaks Vite's build
-          # with: `Cannot find module @rollup/rollup-<platform>`.
-          # Workaround: install the correct optional Rollup package *without* saving
-          # it to package.json, but only on Windows or macOS runners.
-          case "$RUNNER_OS" in
-            Windows)
-              npm i --no-save @rollup/rollup-win32-x64-msvc ;;
-            macOS)
-              npm i --no-save @rollup/rollup-darwin-arm64 || npm i --no-save @rollup/rollup-darwin-x64 ;;
-            Linux)
-              # Linux selects the correct binary already; nothing to do.
-              ;;
-          esac
-          # --- Rollup native binary fix END ---
-          npm run build
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            npm i --no-save @rollup/rollup-win32-x64-msvc
+          elif [[ "${RUNNER_OS}" == "macOS" ]]; then
+            npm i --no-save @rollup/rollup-darwin-arm64
+          fi
 
-      - name: Prepare static assets
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Stage frontend assets into backend/static
+        shell: bash
         run: |
-          rm -rf backend/static
           mkdir -p backend/static
           cp -r frontend/dist/* backend/static/
 
-      - name: Install Python deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-
-      - name: Build executable
-        run: |
-          pyinstaller --onefile \
-            --name can-tool \
-            --add-data "backend/static:static" \
-            --add-data "backend/presets.json:." \
-            --add-data "backend/groups.json:." \
-            --paths backend \
-            backend/__main__.py
+      - name: Package app with PyInstaller
+        run: pyinstaller can-tool.spec
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: can-tool-${{ matrix.os }}
-          path: dist/can-tool*
+          name: can-tool-${{ matrix.os }}-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
