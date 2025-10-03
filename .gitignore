@@ -21,3 +21,12 @@ __pycache__/
 *.swp
 .env
 .env.*
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Diagnostics bundles produced by scripts/linux/can_diag.sh
+# - The script can create a directory and/or a .tar.gz/.tgz in the CWD.
+# - Ignore both so accidental `git add .` won't include them.
+# ─────────────────────────────────────────────────────────────────────────────
+can-diagnostics-*/
+can-diagnostics-*.tar.gz
+can-diagnostics-*.tgz
