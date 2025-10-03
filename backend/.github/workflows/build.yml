@@ -1,0 +1,49 @@
+name: Build CAN Tool
+
+on:
+  push:
+    branches:
+      - feature/packaged-executable
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller fastapi uvicorn[standard] pydantic jinja2
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+          cd ..
+          mkdir -p backend/static
+          cp -r frontend/dist/* backend/static/
+
+      - name: Build executable
+        run: |
+          pyinstaller can-tool.spec
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: can-tool-${{ matrix.os }}
+          path: dist/can-tool*
