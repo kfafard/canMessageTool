@@ -1,0 +1,184 @@
+name: Build & Release CAN Tool
+
+on:
+  # Build + release only when you push a tag like v0.0.3 (and allow manual runs)
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# Needed to create releases & upload assets
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      # 1) Grab the source code
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2) Setup Node 20 and cache npm using the frontend lockfile
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # 3) Setup Python 3.12 for PyInstaller
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      # 4) Install frontend deps deterministically
+      - name: npm ci (frontend)
+        working-directory: frontend
+        run: npm ci
+
+      # 5) Ensure Rollup picks the right native binary for this OS.
+      #    Fixes "Cannot find module @rollup/rollup-<platform>" from Vite build.
+      - name: Ensure Rollup native binary for this OS
+        shell: bash
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          case "${{ runner.os }}" in
+            Windows)
+              npm i -D @rollup/rollup-win32-x64-msvc@^4
+              ;;
+            macOS)
+              npm i -D @rollup/rollup-darwin-arm64@^4
+              ;;
+            Linux)
+              npm i -D @rollup/rollup-linux-x64-gnu@^4
+              ;;
+          esac
+
+      # 6) Build the frontend (Vite)
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      # 7) Copy the built frontend into backend/static so backend can serve it
+      - name: Stage frontend assets into backend/static
+        shell: bash
+        run: |
+          mkdir -p backend/static
+          cp -r frontend/dist/* backend/static/
+
+      # 8) Install backend deps + PyInstaller
+      - name: Install backend deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pyinstaller
+
+      # 9) Build the executable with your PyInstaller spec
+      - name: PyInstaller build
+        run: pyinstaller can-tool.spec
+
+      # 10) Rename main output to include OS + tag to prevent name collisions later
+      #     Linux & macOS both produce "dist/can-tool" otherwise.
+      - name: Rename outputs per-OS (avoid collisions)
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"  # e.g. v0.0.3
+          case "${{ runner.os }}" in
+            Windows)
+              if [ -f dist/can-tool.exe ]; then
+                mv dist/can-tool.exe "dist/can-tool-windows-${TAG}.exe"
+              fi
+              ;;
+            macOS)
+              if [ -f dist/can-tool ]; then
+                mv dist/can-tool "dist/can-tool-macos-${TAG}"
+                chmod +x "dist/can-tool-macos-${TAG}"
+              fi
+              ;;
+            Linux)
+              if [ -f dist/can-tool ]; then
+                mv dist/can-tool "dist/can-tool-linux-${TAG}"
+                chmod +x "dist/can-tool-linux-${TAG}"
+              fi
+              ;;
+          esac
+
+      # 11) Upload the per-OS artifacts
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: can-tool-${{ matrix.os }}-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # A) Checkout so gh has a .git to read if it wants it
+      - name: Checkout (for gh context)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # B) Download ALL artifacts into ./dist (flattened)
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List downloaded files
+        shell: bash
+        run: |
+          echo "Files in dist/:"
+          ls -lah dist
+
+      # C) Create or update the release and upload files.
+      #    --repo fixes "not a git repo" even if checkout wasn't present.
+      - name: Create or update release (idempotent) and upload assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}           # e.g. v0.0.3
+          REPO: ${{ github.repository }}        # e.g. kfafard/canMessageTool
+        run: |
+          set -euo pipefail
+          echo "Using tag: $TAG for repo: $REPO"
+
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $TAG already exists. Will upload/overwrite assets."
+          else
+            echo "Creating new release $TAG"
+            gh release create "$TAG" \
+              --repo "$REPO" \
+              --title "$TAG" \
+              --notes "Automated release for $TAG"
+          fi
+
+          shopt -s nullglob
+          files=(dist/*)
+          if (( ${#files[@]} == 0 )); then
+            echo "No files found in dist/ — failing."
+            exit 1
+          fi
+
+          echo "Uploading ${#files[@]} file(s) to release $TAG:"
+          printf ' - %s\n' "${files[@]}"
+
+          # --clobber: overwrite assets with same filename (safe re-runs)
+          gh release upload "$TAG" "${files[@]}" --clobber --repo "$REPO"

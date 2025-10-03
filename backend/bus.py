@@ -7,6 +7,8 @@ import threading
 import queue
 import subprocess
 import json
+import sys
+import importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
@@ -76,7 +78,7 @@ class _SocketCANBus:
         self.bus = can.interface.Bus(
             channel=self.channel,
             bustype="socketcan",
-            receive_own_messages=True  # <— this is the key
+            receive_own_messages=True  # <— key for loopback echo on vcan
         )
         self._start_rx()
 
@@ -253,6 +255,46 @@ class _IntrepidBus:
         }
 
 
+# --- Kvaser backend (Windows) ------------------------------------------------
+# Present but not wired into BusManager I/O; kept for future Windows work.
+class _KvaserBus:
+    def __init__(self):
+        self._bus = None
+        self._last_info = {}
+
+    async def discover_interfaces(self):
+        return [f"kvaser{i}" for i in range(4)]
+
+    async def connect(self, channel: str, bitrate: int):
+        import can  # python-can
+        try:
+            if not channel.lower().startswith("kvaser"):
+                return False, f"invalid channel name '{channel}'. use 'kvaser0', 'kvaser1', etc."
+            idx = int(channel.replace("kvaser", ""))
+            if self._bus is not None:
+                try:
+                    self._bus.shutdown()
+                except Exception:
+                    pass
+                self._bus = None
+            self._bus = can.interface.Bus(interface="kvaser", channel=idx, bitrate=bitrate)
+            self._last_info = {"backend": "kvaser", "channel": idx, "bitrate": bitrate}
+            return True, f"connected to {channel} @ {bitrate} bps"
+        except Exception as e:
+            return False, f"Failed to open {channel}: {e}"
+
+    async def disconnect(self):
+        if self._bus is not None:
+            try:
+                self._bus.shutdown()
+            except Exception:
+                pass
+            self._bus = None
+
+    def health_snapshot(self):
+        return dict(self._last_info)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers for SocketCAN discovery (fast & non-blocking for the API thread)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -304,22 +346,15 @@ def _list_socketcan_names() -> List[str]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Front-end facing manager (fixed deadlock + offloaded blocking calls)
+# Front-end facing manager (adds _lock/_bus/_info and avoids pre-instantiation)
 # ──────────────────────────────────────────────────────────────────────────────
 
 class BusManager:
-    """
-    Front-end facing manager that hides which backend we're using.
-
-    Key guarantees:
-      - No heavy work in __init__ (app import is instant).
-      - All blocking device ops (.open/.close) are offloaded via asyncio.to_thread.
-      - Thread-safe connect/disconnect via an asyncio.Lock WITHOUT deadlocks.
-    """
     def __init__(self):
-        self._bus: Optional[object] = None
-        self._lock = asyncio.Lock()
-        self._info: Dict[str, Any] = {}
+        # Runtime state guarded by _lock
+        self._bus = None                      # active low-level bus
+        self._info: Dict[str, Any] = {}       # metadata for /health
+        self._lock = asyncio.Lock()           # prevents concurrent connect/disconnect
 
     # ---- Discovery -----------------------------------------------------------
 
@@ -334,6 +369,7 @@ class BusManager:
                 results.append(await t)  # type: ignore[arg-type]
             except Exception:
                 results.append([])
+
         out: List[str] = []
         seen: set[str] = set()
         for group in results:
@@ -345,11 +381,10 @@ class BusManager:
 
     # ---- Connect / Disconnect ----------------------------------------------
 
-    # INTERNAL: do not call without holding self._lock
     async def _disconnect_no_lock(self) -> None:
+        """Close current bus without acquiring _lock (caller must hold it)."""
         if self._bus is not None:
             try:
-                # offload potential blocking close
                 await asyncio.to_thread(self._bus.close)  # type: ignore[attr-defined]
             except Exception:
                 pass
@@ -362,13 +397,13 @@ class BusManager:
         Offloads hardware open to a thread to avoid blocking the event loop.
         """
         async with self._lock:
-            # FIX: avoid deadlock by calling the no-lock variant
             await self._disconnect_no_lock()
             try:
                 if channel.startswith("intrepid"):
+                    if not HAS_INTREPID:
+                        return False, "Intrepid library not available"
                     idx = int(channel.replace("intrepid", "") or "0")
                     b = _IntrepidBus(device_index=idx, bitrate=bitrate)
-                    # offload blocking open
                     await asyncio.to_thread(b.open)
                     self._bus = b
                     name = ""
@@ -387,7 +422,6 @@ class BusManager:
                     if not HAS_PYCAN:
                         return False, "python-can not available"
                     b = _SocketCANBus(channel=channel, bitrate=bitrate)
-                    # offload blocking open
                     await asyncio.to_thread(b.open)
                     self._bus = b
                     self._info = {
