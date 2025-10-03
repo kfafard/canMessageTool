@@ -1,13 +1,13 @@
 name: Build & Release CAN Tool
 
 on:
-  # Only build on tags like v1.2.3 (and allow manual runs from Actions tab)
+  # Build + release only when you push a tag like v0.0.3 (and allow manual runs)
   push:
     tags:
       - 'v*'
   workflow_dispatch:
 
-# Allow this workflow to create releases and upload assets
+# Needed to create releases & upload assets
 permissions:
   contents: write
 
@@ -20,11 +20,11 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
-      # 1) Check out repo
+      # 1) Grab the source code
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Setup Node 20 + enable npm cache keyed by frontend lockfile
+      # 2) Setup Node 20 and cache npm using the frontend lockfile
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -32,7 +32,7 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      # 3) Setup Python 3.12 (needed for PyInstaller)
+      # 3) Setup Python 3.12 for PyInstaller
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -44,9 +44,8 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      # 5) Ensure Rollup has the right native binary for THIS runner OS.
-      #    This fixes:
-      #    "Cannot find module @rollup/rollup-<platform>"
+      # 5) Ensure Rollup picks the right native binary for this OS.
+      #    Fixes "Cannot find module @rollup/rollup-<platform>" from Vite build.
       - name: Ensure Rollup native binary for this OS
         shell: bash
         working-directory: frontend
@@ -69,7 +68,7 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-      # 7) Copy built frontend into backend/static so the backend can serve it
+      # 7) Copy the built frontend into backend/static so backend can serve it
       - name: Stage frontend assets into backend/static
         shell: bash
         run: |
@@ -83,15 +82,41 @@ jobs:
           pip install -r backend/requirements.txt
           pip install pyinstaller
 
-      # 9) Build the executable via your PyInstaller spec
+      # 9) Build the executable with your PyInstaller spec
       - name: PyInstaller build
         run: pyinstaller can-tool.spec
 
-      # 10) Upload each OS build output as an artifact
+      # 10) Rename main output to include OS + tag to prevent name collisions later
+      #     Linux & macOS both produce "dist/can-tool" otherwise.
+      - name: Rename outputs per-OS (avoid collisions)
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"  # e.g. v0.0.3
+          case "${{ runner.os }}" in
+            Windows)
+              if [ -f dist/can-tool.exe ]; then
+                mv dist/can-tool.exe "dist/can-tool-windows-${TAG}.exe"
+              fi
+              ;;
+            macOS)
+              if [ -f dist/can-tool ]; then
+                mv dist/can-tool "dist/can-tool-macos-${TAG}"
+                chmod +x "dist/can-tool-macos-${TAG}"
+              fi
+              ;;
+            Linux)
+              if [ -f dist/can-tool ]; then
+                mv dist/can-tool "dist/can-tool-linux-${TAG}"
+                chmod +x "dist/can-tool-linux-${TAG}"
+              fi
+              ;;
+          esac
+
+      # 11) Upload the per-OS artifacts
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          # Artifact name includes OS + commit so each runner uploads a unique bundle
           name: can-tool-${{ matrix.os }}-${{ github.sha }}
           path: dist/*
           if-no-files-found: error
@@ -101,11 +126,16 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # explicit here too
+      contents: write
 
     steps:
-      # 11) Download ALL artifacts from the matrix builds into one folder.
-      #     merge-multiple: true flattens artifacts into ./dist/
+      # A) Checkout so gh has a .git to read if it wants it
+      - name: Checkout (for gh context)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # B) Download ALL artifacts into ./dist (flattened)
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -118,24 +148,24 @@ jobs:
           echo "Files in dist/:"
           ls -lah dist
 
-      # 12) Create or update the GitHub Release & upload assets idempotently.
-      #     - If the release for this tag exists, we just upload/overwrite assets.
-      #     - If it doesn't, we create it then upload.
+      # C) Create or update the release and upload files.
+      #    --repo fixes "not a git repo" even if checkout wasn't present.
       - name: Create or update release (idempotent) and upload assets
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}       # auth for gh cli
-          TAG: ${{ github.ref_name }}         # e.g. v0.0.3
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}           # e.g. v0.0.3
+          REPO: ${{ github.repository }}        # e.g. kfafard/canMessageTool
         run: |
           set -euo pipefail
+          echo "Using tag: $TAG for repo: $REPO"
 
-          echo "Using tag: $TAG"
-
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists. Will upload and overwrite assets as needed."
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $TAG already exists. Will upload/overwrite assets."
           else
             echo "Creating new release $TAG"
             gh release create "$TAG" \
+              --repo "$REPO" \
               --title "$TAG" \
               --notes "Automated release for $TAG"
           fi
@@ -150,5 +180,5 @@ jobs:
           echo "Uploading ${#files[@]} file(s) to release $TAG:"
           printf ' - %s\n' "${files[@]}"
 
-          # --clobber overwrites assets with the same filename (idempotent)
-          gh release upload "$TAG" "${files[@]}" --clobber
+          # --clobber: overwrite assets with same filename (safe re-runs)
+          gh release upload "$TAG" "${files[@]}" --clobber --repo "$REPO"
