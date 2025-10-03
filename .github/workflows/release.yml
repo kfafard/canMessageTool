@@ -30,6 +30,22 @@ jobs:
         run: |
           cd frontend
           npm ci
+          # --- Rollup native binary fix START ---
+          # Context: npm sometimes fails to install optional OS-specific Rollup
+          # binaries on Windows/macOS when using `npm ci`, which breaks Vite's build
+          # with: `Cannot find module @rollup/rollup-<platform>`.
+          # Workaround: install the correct optional Rollup package *without* saving
+          # it to package.json, but only on Windows or macOS runners.
+          case "$RUNNER_OS" in
+            Windows)
+              npm i --no-save @rollup/rollup-win32-x64-msvc ;;
+            macOS)
+              npm i --no-save @rollup/rollup-darwin-arm64 || npm i --no-save @rollup/rollup-darwin-x64 ;;
+            Linux)
+              # Linux selects the correct binary already; nothing to do.
+              ;;
+          esac
+          # --- Rollup native binary fix END ---
           npm run build
           cd ..
           mkdir -p backend/static

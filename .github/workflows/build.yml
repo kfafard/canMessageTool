@@ -1,118 +1,130 @@
-name: CAN Tool – Build & (optional) Release
+# .github/workflows/build.yml
+# PURPOSE:
+# - Build the frontend with Vite across Linux/Windows/macOS runners.
+# - Regenerate the frontend lockfile per-OS so Rollup's optional platform binary is included.
+# - Install backend Python dependencies (including python-can) before packaging with PyInstaller.
+# - Upload the built artifacts.
+
+name: Build
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ main, feature/packaged-executable ]
-    tags:
-      - 'v*'        # push a tag like v1.2.3 to create a release
+    branches: [ "feature/packaged-executable", "main" ]
   pull_request:
-    branches: [ main ]
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   build:
-    name: Build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    # Build on all three OSes to produce native executables / artifacts
     strategy:
-      fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest, macos-13]  # macOS Intel; add macos-latest if you want Apple Silicon runners
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout
+      # ----------------------------
+      # 1) Check out the repository
+      # ----------------------------
+      - name: Check out repo
         uses: actions/checkout@v4
 
-      # ---------- Frontend ----------
-      - name: Setup Node
+      # ------------------------------------------------
+      # 2) Set up Node.js (used for the Vite front-end)
+      # ------------------------------------------------
+      - name: Use Node.js 20 and enable npm cache
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: 20
+          # We still cache per OS, and we will regenerate the lockfile per-OS below.
+          cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install & build frontend
-        working-directory: frontend
-        run: |
-          npm ci || npm install
-          npm run build
-
-      - name: Stage built frontend into backend/static
-        run: |
-          rm -rf backend/static
-          mkdir -p backend/static
-          cp -r frontend/dist/* backend/static/
-
-      # ---------- Backend / PyInstaller ----------
-      - name: Setup Python
+      # -----------------------------------------------------------------
+      # 3) Set up Python 3.12 for the backend + enable pip cache (faster)
+      # -----------------------------------------------------------------
+      - name: Use Python 3.12 with pip cache
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: 'pip'
-          cache-dependency-path: |
-            backend/requirements.txt
-            can-tool.spec
 
-      - name: Install backend deps
+      # --------------------------------------------------------
+      # 4) Install Python packages needed for packaging & server
+      #    - We install python-can so PyInstaller sees it.
+      #    - If you have backend/requirements.txt, we'll prefer it.
+      # --------------------------------------------------------
+      - name: Install backend Python deps
+        shell: bash
         run: |
-          python -m pip install --upgrade pip
+          set -euxo pipefail
+          python -m pip install --upgrade pip wheel
           if [ -f backend/requirements.txt ]; then
+            # If you keep your deps pinned, use this. Make sure python-can is listed there.
             pip install -r backend/requirements.txt
           else
-            pip install fastapi "uvicorn[standard]" pyinstaller python-can pydantic jinja2
+            # Minimal set to match your current backend usage + fix PyInstaller hidden import warnings.
+            pip install fastapi "uvicorn[standard]" pydantic jinja2 python-can
           fi
+          # PyInstaller used to package the backend later
+          pip install pyinstaller
 
-      - name: Build executable with PyInstaller
+      # --------------------------------------------------------------------------
+      # 5) BUILD FRONTEND (with OS-specific lockfile regeneration)
+      #
+      # WHY: The Linux-generated lockfile does not include Rollup's optional
+      #      platform binary (@rollup/rollup-<platform>) on Windows/macOS.
+      #      We remove the lockfile and recreate it on each OS so npm can
+      #      record and install the correct platform package.
+      # STEPS:
+      #   - rm -f package-lock.json: remove any cross-OS lockfile
+      #   - npm install --package-lock-only: recreate lockfile WITHOUT installing
+      #   - npm ci: clean install using the (now correct) lockfile
+      #   - npm run build: produce /frontend/dist
+      #   - copy dist to backend/static so the backend can serve the files
+      # --------------------------------------------------------------------------
+      - name: Build frontend (regenerate lockfile per OS)
+        shell: bash
         run: |
-          pyinstaller --clean --noconfirm can-tool.spec
+          set -euxo pipefail
+          cd frontend
 
-      # ---------- Package artifacts ----------
-      - name: Package (Windows)
-        if: startsWith(matrix.os, 'windows')
-        shell: pwsh
+          # Remove any pre-existing lockfile (e.g., created on Linux)
+          rm -f package-lock.json
+
+          # Recreate an OS-correct lockfile WITHOUT downloading all packages yet.
+          # This makes sure the correct optional @rollup/rollup-<platform> gets recorded.
+          npm install --package-lock-only
+
+          # Clean, reproducible install based on the regenerated lockfile
+          npm ci
+
+          # Build Vite app -> outputs to /frontend/dist
+          npm run build
+
+          cd ..
+
+          # Ensure backend static dir exists
+          mkdir -p backend/static
+
+          # Copy the built frontend to the backend static directory
+          cp -r frontend/dist/* backend/static/
+
+      # ------------------------------------------------------------
+      # 6) Package the backend into a single executable with PyInstaller
+      #    - Relies on can-tool.spec in the repo root.
+      # ------------------------------------------------------------
+      - name: Package backend (PyInstaller)
+        shell: bash
         run: |
-          New-Item -ItemType Directory -Force -Path package | Out-Null
-          Copy-Item dist\can-tool.exe package\
-          Compress-Archive -Path package\* -DestinationPath can-tool-${{ matrix.os }}.zip
+          set -euxo pipefail
+          pyinstaller can-tool.spec
 
-      - name: Package (Unix)
-        if: ${{ !startsWith(matrix.os, 'windows') }}
-        run: |
-          tar -C dist -czf can-tool-${{ matrix.os }}.tar.gz can-tool
-
-      - name: Upload artifact
+      # ------------------------------------------------------------
+      # 7) Upload the artifacts from /dist (created by PyInstaller)
+      # ------------------------------------------------------------
+      - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
-          name: can-tool-${{ matrix.os }}
-          path: |
-            can-tool-*.zip
-            can-tool-*.tar.gz
-            dist/**
-
-  release:
-    name: Create GitHub Release
-    needs: build
-    runs-on: ubuntu-22.04
-    if: startsWith(github.ref, 'refs/tags/')
-    permissions:
-      contents: write   # required to create a release
-
-    steps:
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            artifacts/**/can-tool-*.zip
-            artifacts/**/can-tool-*.tar.gz
+          name: can-tool-${{ matrix.os }}-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
