@@ -5,23 +5,20 @@ import asyncio
 import json
 import sys
 import re
-import os
-import shlex
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi import HTTPException
 from pydantic import BaseModel 
 from paths import ensure_user_file
 from auto_setup import ensure_can_environment, log_env_summary
 
 # Local modules
-from bus import BusManager, Frame
+from bus import BusManager
 from decoder import decode_frame, safe_hex
 from j1939_maps import PGN_NAME_MAP
 from models import ConnectRequest, SendRequest, LogStartRequest
@@ -41,23 +38,32 @@ app.add_middleware(
 
 # ---------------- Privileged runner and link helpers ----------------
 
+# backend/app.py  (replace _run_priv)
 def _run_priv(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
     """
-    Run a privileged netlink command. We try directly first (works if the Linux
-    binary has cap_net_admin/cap_net_raw). If that fails for permissions and
-    pkexec is available, we transparently retry with pkexec (GUI password).
+    Run a privileged netlink command.
+
+    Behavior:
+    - Try normally first.
+    - If it fails (non-zero exit), and it *looks* like a permission problem,
+      retry via pkexec (GUI password) when available.
+    - If check=True, raise CalledProcessError for a non-zero final result.
     """
-    try:
-        return subprocess.run(cmd, text=True, capture_output=True, check=check)
-    except subprocess.CalledProcessError as e:
-        # If permission problem, try pkexec if present
-        if ("Operation not permitted" in (e.stderr or "") or e.returncode in (1, 126)) and shutil.which("pkexec"):
-            return subprocess.run(["pkexec", *cmd], text=True, capture_output=True, check=check)
-        raise
-    except PermissionError:
-        if shutil.which("pkexec"):
-            return subprocess.run(["pkexec", *cmd], text=True, capture_output=True, check=check)
-        raise
+    proc = subprocess.run(cmd, text=True, capture_output=True)
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "")
+        looks_perm = (
+            "Operation not permitted" in stderr
+            or "permission denied" in stderr.lower()
+            or proc.returncode in (1, 126, 127)
+        )
+        if looks_perm and shutil.which("pkexec"):
+            proc = subprocess.run(["pkexec", *cmd], text=True, capture_output=True)
+
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, output=proc.stdout, stderr=proc.stderr)
+
+    return proc
 
 def _ip_exists(iface: str) -> bool:
     r = subprocess.run(["ip", "-br", "link", "show", iface], text=True, capture_output=True)
@@ -107,25 +113,11 @@ log_buffer: List[str] = ["timestamp,id_hex,pgn,sa,data_hex,decoded_json\n"]
 # -----------------------------------------------------------------------------
 # Helpers for bring-up
 # -----------------------------------------------------------------------------
-def _which_any(*names: str) -> str:
-    """Return first existing absolute path for a binary name; raise if none."""
-    for n in names:
-        p = shutil.which(n)
-        if p:
-            return p
-    raise FileNotFoundError(f"Missing required tool: {', '.join(names)}")
-
-def _safe_bitrate(bps: int) -> int:
-    allowed = {125000, 250000, 500000, 1000000}
-    if bps in allowed:
-        return bps
-    raise HTTPException(status_code=400, detail=f"Unsupported bitrate {bps}")
-
 def _safe_iface(name: str) -> str:
-    import re
     if re.fullmatch(r"(v?can)\d{1,3}", name):
         return name
     raise HTTPException(status_code=400, detail=f"Bad interface name {name}")
+
 
 # -----------------------------------------------------------------------------
 # API routes
@@ -223,7 +215,11 @@ def api_can_bringup(req: BringUpReq):
 
         # Physical SocketCAN device: DOWN -> type can bitrate -> UP
         # Bring it down first (ignore error if it's already down)
-        _run_priv(["ip", "link", "set", iface, "down"], check=False)
+        try:
+            _run_priv(["ip", "link", "set", iface, "down"], check=True)
+        except subprocess.CalledProcessError:
+            # Ignore errors like "Cannot find device" — the next steps will clarify state
+            pass
         # Configure bitrate/type (this is what fails if you try it on vcan or while UP)
         _run_priv(["ip", "link", "set", iface, "type", "can", "bitrate", str(bitrate)], check=True)
         # Bring it up
@@ -294,7 +290,6 @@ async def api_platform():
     Report the server's platform: 'linux', 'win32', 'darwin', etc.
     Frontend uses this to hide Bring Up on Windows (not needed for Kvaser).
     """
-    import sys
     return {"platform": sys.platform}
 
 # ----------------------------- Logging control -------------------------------

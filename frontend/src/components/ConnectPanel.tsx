@@ -24,29 +24,15 @@ export default function ConnectPanel({
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<Status | null>(null)
   const [loadingStatus, setLoadingStatus] = useState(false)
-  const [platform, setPlatform] = useState<string>("unknown") // NEW: server OS
   const BITRATE = 250_000
 
-  // Determine link state (parses the compact "ip -brief" style output)
+  // Parse "ip -br link show" output to infer UP/DOWN
   const linkState = (() => {
     const line = status?.output || ""
     if (/[\s:]UP(\s|$)/.test(line) || /state\s+UP/i.test(line)) return "UP"
     if (/DOWN/i.test(line)) return "DOWN"
     return "UNKNOWN"
   })()
-
-  // Fetch platform once so we can hide "Bring up" on non-Linux
-  useEffect(() => {
-    ;(async () => {
-      try {
-        const r = await fetch("/api/platform")
-        const j = await r.json()
-        setPlatform(String(j.platform || "unknown"))
-      } catch {
-        setPlatform("unknown")
-      }
-    })()
-  }, [])
 
   const fetchStatus = useCallback(async () => {
     setLoadingStatus(true)
@@ -65,7 +51,6 @@ export default function ConnectPanel({
     fetchStatus()
   }, [fetchStatus, chan, connected])
 
-  // Ask backend to bring up SocketCAN (Linux only). On Windows/Mac this is a no-op.
   async function bringUp() {
     setBusy(true)
     try {
@@ -75,25 +60,23 @@ export default function ConnectPanel({
         body: JSON.stringify({ iface: chan, bitrate: BITRATE }),
       })
       const data = await res.json()
-      if (!res.ok || !data.ok) throw new Error(data.detail || "Bring-up failed")
+      if (!res.ok || !data.ok) {
+        throw new Error(data.detail || "Bring-up failed")
+      }
+      // Refresh link status; no alert on success
       await fetchStatus()
-      alert(`Interface ${data.iface} is UP at ${data.bitrate} bps`)
     } catch (e: any) {
+      // Only alert on failure (prevents the confusing "null bps" popup on vcan)
       alert(`Bring-up error: ${e?.message || e}`)
     } finally {
       setBusy(false)
     }
   }
 
-  // Show/Hide bring-up based on platform: Linux needs it, Windows (Kvaser) does not.
-  const showBringUp = platform.startsWith("linux") && !connected
-
   return (
     <div className="card p-3">
       <div className="flex items-center justify-between mb-2">
         <div className="fg-strong text-sm font-semibold">Connection</div>
-
-        {/* Link state badge + refresh */}
         <div className="flex items-center gap-2">
           <span
             className={
@@ -123,20 +106,13 @@ export default function ConnectPanel({
             onChange={(e) => setChan(e.target.value)}
             disabled={connected}
           >
-            {interfaces?.length
-              ? interfaces.map((i) => (
-                  <option key={i} value={i}>
-                    {i}
-                  </option>
-                ))
-              : [<option key="can0">can0</option>]}
+            {(interfaces?.length ? interfaces : ["can0", "vcan0"]).map((i) => (
+              <option key={i} value={i}>{i}</option>
+            ))}
           </select>
-          {/* Show the detected platform as a tiny hint */}
-          <div className="text-[10px] text-fg-muted mt-1">Platform: {platform}</div>
         </div>
       </div>
 
-      {/* Raw status line (compact, helpful for debugging) */}
       {status?.output && (
         <div className="mt-2 text-[11px] font-mono text-fg-muted truncate">
           {status.output}
@@ -144,7 +120,7 @@ export default function ConnectPanel({
       )}
 
       <div className="mt-3 flex flex-wrap gap-2">
-        {showBringUp && (
+        {!connected && (
           <button className="btn" disabled={busy} onClick={bringUp}>
             {busy ? "Bringing up…" : `Bring up ${chan} (${BITRATE.toLocaleString()} bps)`}
           </button>
@@ -155,8 +131,8 @@ export default function ConnectPanel({
             Disconnect
           </button>
         ) : (
-          <button className="btn" disabled={busy} onClick={bringUp}>
-            {busy ? "Bringing up…" : `Bring up ${chan} (${chan.startsWith("vcan") ? "no bitrate" : BITRATE.toLocaleString() + " bps"})`}
+          <button className="btn-primary" onClick={() => onConnect()}>
+            Connect
           </button>
         )}
       </div>
