@@ -1,7 +1,7 @@
 name: Build & Release CAN Tool
 
 on:
-  # Run on tags like v1.2.3, and allow manual runs.
+  # Only build on tags like v1.2.3 (and allow manual runs from Actions tab)
   push:
     tags:
       - 'v*'
@@ -20,11 +20,11 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
-      # 1) Check out code
+      # 1) Check out repo
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Setup Node 20 + npm cache based on the frontend lockfile
+      # 2) Setup Node 20 + enable npm cache keyed by frontend lockfile
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -32,7 +32,7 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      # 3) Setup Python 3.12 (for PyInstaller build)
+      # 3) Setup Python 3.12 (needed for PyInstaller)
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -44,8 +44,9 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      # 5) Ensure Rollup has the correct native binary for this OS
-      #    This fixes the "Cannot find module @rollup/rollup-<platform>" error.
+      # 5) Ensure Rollup has the right native binary for THIS runner OS.
+      #    This fixes:
+      #    "Cannot find module @rollup/rollup-<platform>"
       - name: Ensure Rollup native binary for this OS
         shell: bash
         working-directory: frontend
@@ -68,28 +69,29 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-      # 7) Copy built frontend into backend/static for packaging
+      # 7) Copy built frontend into backend/static so the backend can serve it
       - name: Stage frontend assets into backend/static
         shell: bash
         run: |
           mkdir -p backend/static
           cp -r frontend/dist/* backend/static/
 
-      # 8) Install backend deps and PyInstaller
+      # 8) Install backend deps + PyInstaller
       - name: Install backend deps
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
           pip install pyinstaller
 
-      # 9) Build the executable with PyInstaller spec
+      # 9) Build the executable via your PyInstaller spec
       - name: PyInstaller build
         run: pyinstaller can-tool.spec
 
-      # 10) Upload the per-OS build output as artifacts
+      # 10) Upload each OS build output as an artifact
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
+          # Artifact name includes OS + commit so each runner uploads a unique bundle
           name: can-tool-${{ matrix.os }}-${{ github.sha }}
           path: dist/*
           if-no-files-found: error
@@ -98,17 +100,55 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # explicit here too
+
     steps:
-      # 11) Download all artifacts from the matrix builds
+      # 11) Download ALL artifacts from the matrix builds into one folder.
+      #     merge-multiple: true flattens artifacts into ./dist/
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: ./dist
+          path: dist
+          merge-multiple: true
 
-      # 12) Create (or update) a GitHub Release for the pushed tag and attach the files
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ./dist/**/*  # upload everything we just downloaded
+      - name: List downloaded files
+        shell: bash
+        run: |
+          echo "Files in dist/:"
+          ls -lah dist
+
+      # 12) Create or update the GitHub Release & upload assets idempotently.
+      #     - If the release for this tag exists, we just upload/overwrite assets.
+      #     - If it doesn't, we create it then upload.
+      - name: Create or update release (idempotent) and upload assets
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}       # auth for gh cli
+          TAG: ${{ github.ref_name }}         # e.g. v0.0.3
+        run: |
+          set -euo pipefail
+
+          echo "Using tag: $TAG"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists. Will upload and overwrite assets as needed."
+          else
+            echo "Creating new release $TAG"
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes "Automated release for $TAG"
+          fi
+
+          shopt -s nullglob
+          files=(dist/*)
+          if (( ${#files[@]} == 0 )); then
+            echo "No files found in dist/ — failing."
+            exit 1
+          fi
+
+          echo "Uploading ${#files[@]} file(s) to release $TAG:"
+          printf ' - %s\n' "${files[@]}"
+
+          # --clobber overwrites assets with the same filename (idempotent)
+          gh release upload "$TAG" "${files[@]}" --clobber
