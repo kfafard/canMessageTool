@@ -24,16 +24,29 @@ export default function ConnectPanel({
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<Status | null>(null)
   const [loadingStatus, setLoadingStatus] = useState(false)
+  const [platform, setPlatform] = useState<string>("unknown") // NEW: server OS
   const BITRATE = 250_000
 
-  // Parse ip -brief output to infer UP/DOWN
-  // Example line: "can0  UP  <NOARP,UP,LOWER_UP,ECHO>"
+  // Determine link state (parses the compact "ip -brief" style output)
   const linkState = (() => {
     const line = status?.output || ""
     if (/[\s:]UP(\s|$)/.test(line) || /state\s+UP/i.test(line)) return "UP"
     if (/DOWN/i.test(line)) return "DOWN"
     return "UNKNOWN"
   })()
+
+  // Fetch platform once so we can hide "Bring up" on non-Linux
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const r = await fetch("/api/platform")
+        const j = await r.json()
+        setPlatform(String(j.platform || "unknown"))
+      } catch {
+        setPlatform("unknown")
+      }
+    })()
+  }, [])
 
   const fetchStatus = useCallback(async () => {
     setLoadingStatus(true)
@@ -52,6 +65,7 @@ export default function ConnectPanel({
     fetchStatus()
   }, [fetchStatus, chan, connected])
 
+  // Ask backend to bring up SocketCAN (Linux only). On Windows/Mac this is a no-op.
   async function bringUp() {
     setBusy(true)
     try {
@@ -61,10 +75,7 @@ export default function ConnectPanel({
         body: JSON.stringify({ iface: chan, bitrate: BITRATE }),
       })
       const data = await res.json()
-      if (!res.ok || !data.ok) {
-        throw new Error(data.detail || "Bring-up failed")
-      }
-      // refresh link status after success
+      if (!res.ok || !data.ok) throw new Error(data.detail || "Bring-up failed")
       await fetchStatus()
       alert(`Interface ${data.iface} is UP at ${data.bitrate} bps`)
     } catch (e: any) {
@@ -73,6 +84,9 @@ export default function ConnectPanel({
       setBusy(false)
     }
   }
+
+  // Show/Hide bring-up based on platform: Linux needs it, Windows (Kvaser) does not.
+  const showBringUp = platform.startsWith("linux") && !connected
 
   return (
     <div className="card p-3">
@@ -117,6 +131,8 @@ export default function ConnectPanel({
                 ))
               : [<option key="can0">can0</option>]}
           </select>
+          {/* Show the detected platform as a tiny hint */}
+          <div className="text-[10px] text-fg-muted mt-1">Platform: {platform}</div>
         </div>
       </div>
 
@@ -128,7 +144,7 @@ export default function ConnectPanel({
       )}
 
       <div className="mt-3 flex flex-wrap gap-2">
-        {!connected && (
+        {showBringUp && (
           <button className="btn" disabled={busy} onClick={bringUp}>
             {busy ? "Bringing up…" : `Bring up ${chan} (${BITRATE.toLocaleString()} bps)`}
           </button>

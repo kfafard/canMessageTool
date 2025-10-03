@@ -1,0 +1,9 @@
+=== ip -br link ===
+lo               UNKNOWN        00:00:00:00:00:00 <LOOPBACK,UP,LOWER_UP> 
+enxe8cf83de5c12  DOWN           e8:cf:83:de:5c:12 <NO-CARRIER,BROADCAST,MULTICAST,UP> 
+wlp0s20f3        UP             f4:26:79:80:69:89 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+wlx58ef68270fb2  UP             58:ef:68:27:0f:b2 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+docker0          UP             02:42:36:85:a7:6a <BROADCAST,MULTICAST,UP,LOWER_UP> 
+veth1f8dba0@if6  UP             fe:7d:5b:f9:c7:13 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+
+=== ip -details link show type can ===

@@ -13,6 +13,7 @@ from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from paths import ensure_user_file
+from auto_setup import ensure_can_environment, log_env_summary
 
 # Local modules
 from bus import BusManager, Frame
@@ -246,6 +247,15 @@ async def save_groups(payload: Dict[str, Any]):
     tmp.replace(GROUPS_PATH)
     return {"status": "ok"}
 
+@app.get("/api/platform")
+async def api_platform():
+    """
+    Report the server's platform: 'linux', 'win32', 'darwin', etc.
+    Frontend uses this to hide Bring Up on Windows (not needed for Kvaser).
+    """
+    import sys
+    return {"platform": sys.platform}
+
 # ----------------------------- Logging control -------------------------------
 
 @app.post("/api/log/start")
@@ -292,6 +302,20 @@ async def stream(ws: WebSocket):
                 await ws.send_json({"type": "health", "value": bus_health_snapshot_safe()})
     except WebSocketDisconnect:
         return
+    
+@app.on_event("startup")
+async def _env_summary():
+    # Writes a one-line summary into the log for support
+    log_env_summary()
+
+@app.post("/api/auto_setup")
+def api_auto_setup():
+    """
+    UI hits this when the user clicks 'Fix CAN' or on first-run.
+    Never throws; returns a dict with success/message/details.
+    """
+    return ensure_can_environment()
+
 
 # ----------------------------- Static UI (mounted last) ----------------------
 

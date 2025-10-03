@@ -13,7 +13,7 @@ hidden = [
 hidden += collect_submodules("can.interfaces")
 
 a = Analysis(
-    ["backend/__main__.py"],
+    ["backend/entry.py"],
     pathex=["backend"],
     binaries=[],
     datas=[

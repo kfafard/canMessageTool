@@ -1,259 +1,138 @@
 # CAN Tool
 
-CAN Tool is a combined **backend (FastAPI)** + **frontend (Vite/React)** app for working with CAN bus devices (SocketCAN, Intrepid, etc.).  
-It includes helpers for bringing up a CAN interface (e.g., `can0`) and for quick hardware tests.
+A combined backend (FastAPI) + frontend (Vite/React) app for working with CAN bus devices.
+
+- **Windows 11 (Kvaser)**: Uses Kvaser CANlib via python-can.
+- **Linux Mint (SocketCAN)**: Uses native SocketCAN (can0) and can auto-bring-up the interface using `pkexec`.
 
 ---
 
-## 🚀 Quick Download (Non-Technical Users)
+## Download (prebuilt)
 
-You don’t need to install anything. Download the prebuilt app for **your OS** from GitHub Releases.
+Go to the Releases page and download:
 
-### Step-by-step (all platforms)
+- **Windows**: `can-tool-windows-<tag>.exe`
+- **Linux Mint**: `can-tool-linux-<tag>`
 
-1) Open the project’s **Releases** page (top bar → **Releases**) and click the **latest version** (looks like `vX.Y.Z`).  
-2) Under **Assets**, download the file for **your OS**:
-   - **Windows** → typically a ZIP named like `can-tool-windows-<tag>.zip`.
-   - **macOS (Apple Silicon)** → a ZIP like `can-tool-macos-<tag>.zip`.  
-     _Note: built for Apple Silicon (arm64)._
-   - **Linux (x86_64)** → a TAR/ZIP like `can-tool-ubuntu-<tag>.tar.gz` (from Ubuntu 24.04, glibc 2.39).
-3) **Extract** the archive (right-click → Extract / “Open archive”).
-4) Inside the extracted folder, run the app:
-   - **Windows**: double-click `can-tool.exe`.
-   - **macOS**: in Finder, **Right-click → Open** on `can-tool` the first time (bypasses Gatekeeper), then click **Open**.
-   - **Linux**: open Terminal in that folder:
-     ```bash
-     chmod +x ./can-tool
-     ./can-tool
-     ```
-5) Your browser will open to **http://127.0.0.1:8000** (the tool’s UI).  
-6) Connect to your CAN interface and use the tool.
-
-### Notes for each OS
-
-- **Windows**
-  - If SmartScreen warns about an unknown publisher: click **More info → Run anyway**.
-  - If a firewall prompt appears: allow access on **Private networks** (localhost only).
-  - Install your adapter’s drivers (Kvaser, Intrepid, etc.).
-
-- **macOS (Apple Silicon)**
-  - First launch: **Right-click → Open** (Gatekeeper) as mentioned above.
-  - If you blocked it accidentally: System Settings → **Privacy & Security** → allow the app.
-
-- **Linux**
-  - Built on **Ubuntu 24.04**. On older distros you may need newer glibc.
-  - To use SocketCAN you may need `can-utils` and interface permissions:
-    ```bash
-    sudo apt update
-    sudo apt install -y can-utils
-    # Example bring-up at 250 kbit/s
-    sudo ip link set can0 type can bitrate 250000
-    sudo ip link set can0 up
-    ```
-  - Or use the helper commands in **run.sh** (see below).
+> Replace `<tag>` with the release you want (e.g. `v0.0.5`).
 
 ---
 
-## 🏗️ How Releases Are Built (CI)
+## Non-technical quick start
 
-- Builds are created **only when you push a Git tag** (example: `v0.3.0`).  
-- The GitHub Action compiles the app for **Windows**, **macOS (arm64)**, and **Linux (x86_64)** and attaches the artifacts to that Release.
+### Windows 11 (Kvaser)
 
-### Cut a new Release (maintainers)
+1. Install **Kvaser CANlib drivers** (required for Kvaser hardware).
+2. Double-click `can-tool-windows-<tag>.exe`.
+3. Your browser opens at **http://127.0.0.1:8000**.
+4. In **Interface**, pick **kvaser0** (use kvaser1 if you have multiple).
+5. Click **Connect** and start using the tool.
 
-```bash
-# 1) Commit all changes on your branch
-git add -A
-git commit -m "Your message"
+**Notes**
+- “Bring up” is not needed on Windows/Kvaser.
+- If it won’t connect, check **Kvaser Device Guide** and your drivers.
 
-# 2) Tag with a semver-style tag (this is what triggers the build)
-git tag v0.3.0
+### Linux Mint (SocketCAN)
 
-# 3) Push the tag to GitHub (this starts the CI build + release)
-git push origin v0.3.0
-````
+1. Make the file executable (first time only), then run it:
+   ```bash
+   chmod +x can-tool-linux-<tag>
+   ./can-tool-linux-<tag>
 
-Then go to **GitHub → Actions** or **Releases** and download the artifacts.
+    Your browser opens at http://127.0.0.1:8000
 
----
+    .
 
-## 🧪 Local Development (from source)
+    In Interface, pick can0 (or vcan0 for virtual testing).
 
-### Backend (FastAPI)
+    Click Bring up can0 (250,000 bps).
 
-**Requirements:** Python 3.12
+        A pkexec password prompt may appear to allow ip link commands.
 
-```bash
-# From repo root
+    Click Connect and start using the tool.
+
+Notes
+
+    Avoid prompts by granting capabilities once:
+
+sudo apt install -y libcap2-bin
+sudo setcap 'cap_net_raw,cap_net_admin+eip' ./can-tool-linux-<tag>
+
+If port 8000 is “busy”:
+
+    sudo lsof -i TCP:8000 -sTCP:LISTEN -n -P
+    kill -9 <PID>
+
+Developer quick start (optional)
+Backend
+
 cd backend
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -U pip
 pip install -r requirements.txt
 uvicorn app:app --reload --host 0.0.0.0 --port 8000
-```
 
-Verify:
+Frontend
 
-* Swagger UI → [http://localhost:8000/docs](http://localhost:8000/docs)
-* Health → `curl http://localhost:8000/api/health`
-
-### Frontend (Vite + React)
-
-**Requirements:** Node.js 20
-
-```bash
 cd frontend
 npm ci
 npm run dev
-```
 
-Open [http://localhost:5173](http://localhost:5173)
+Open http://localhost:5173
+
+in your browser.
+CAN helpers (Linux)
+
+The app exposes:
+
+    GET /api/interfaces – list candidate interfaces
+
+    GET /api/can/status?iface=can0 – show current link state
+
+    POST /api/can/bringup – perform SocketCAN bring-up (uses pkexec if needed)
+
+Building a release (tags-only)
+
+# from the repo root
+git add .
+git commit -m "Win (Kvaser) support; Linux bring-up UX; docs"
+git tag v0.0.5
+git push origin v0.0.5
+
+The CI workflow publishes:
+
+    can-tool-windows-<tag>.exe
+
+    can-tool-linux-<tag>
+
+to the GitHub Release.
+
+
+**Why:** Keeps the docs focused on the two platforms we care about, with a non-technical path for each.
 
 ---
 
-## ▶️ Running Backend + Frontend Together (dev helper)
+## what changed, why, and what it fixes (quick)
 
-`run.sh` manages both backend (port **8000**) and frontend (Vite on **5173**):
+- **Error we saw (Linux):** `address already in use` on port **8000** → caused by a previous `can-tool` still running.  
+  **Fix:** kill PID; no code changes needed.
+
+- **Error we saw (Linux):** `No such device can0` → interface not brought up.  
+  **Fix in product:** “Bring up” button calls `/api/can/bringup` (with sudo via `pkexec` if needed).
+
+- **Windows couldn’t “bring up”** → because Windows has **no SocketCAN**.  
+  **Fix in product:** add **Kvaser backend** via `python-can` and **hide the Bring Up button** on Windows.  
+  Users select `kvaser0` and click **Connect**.
+
+---
+
+## after you paste these in
 
 ```bash
-./run.sh start     # start both in background
-./run.sh stop      # stop both
-./run.sh restart
-./run.sh status    # shows backend/frontend PIDs + CAN status
-./run.sh up        # backend in background, frontend in foreground (Ctrl+C stops both)
-```
+# from repo root
+git checkout -b feat/kvaser-and-linux-ux
+git add backend/requirements.txt backend/bus.py backend/app.py frontend/src/components/ConnectPanel.tsx README.md
+git commit -m "Windows Kvaser support + Linux socketcan bring-up UX; docs"
+git push -u origin feat/kvaser-and-linux-ux
 
-**Logs (background runs):**
-
-* `backend/backend.log`
-* `frontend/frontend.log`
-
-**PID files:** `backend.pid`, `frontend.pid`, `candump.pid`
-
----
-
-## 🚌 CAN Interface Helpers
-
-```bash
-./run.sh can-up       # Load modules and bring up CAN (250000 bps) as can0
-./run.sh can-down     # Stop candump (if any) and bring can0 down
-./run.sh can-test     # Bring up (if needed), run candump, send one test frame, show log
-```
-
-**Auto-CAN mode** (start/stop brings CAN up/down automatically):
-
-```bash
-AUTO_CAN=1 ./run.sh start
-AUTO_CAN=1 ./run.sh stop
-# also works with: AUTO_CAN=1 ./run.sh up
-```
-
-Quick sanity test:
-
-```bash
-./run.sh can-up
-./run.sh can-test
-./run.sh can-down
-```
-
----
-
-## 🔌 Ports & URLs
-
-* Backend (Uvicorn): **[http://localhost:8000](http://localhost:8000)** (Swagger at `/docs`)
-* Frontend (Vite dev): **[http://localhost:5173](http://localhost:5173)**
-* Packaged app (all-in-one): opens **[http://127.0.0.1:8000](http://127.0.0.1:8000)** automatically
-
----
-
-## 🧰 Example API Calls
-
-```bash
-# Health
-curl http://localhost:8000/api/health
-
-# List interfaces
-curl http://localhost:8000/api/interfaces
-
-# Connect to a CAN interface
-curl -X POST http://localhost:8000/api/connect \
-     -H "Content-Type: application/json" \
-     -d '{"channel":"can0","bitrate":250000}'
-
-# WebSocket stream (example using websocat)
-# websocat ws://localhost:8000/api/stream
-```
-
----
-
-## 🧯 Troubleshooting
-
-**Non-technical users**
-
-* Browser didn’t open? Manually visit [http://127.0.0.1:8000](http://127.0.0.1:8000) after starting the app.
-* “Port already in use”? Close other apps using port **8000** and try again.
-
-**Windows**
-
-* SmartScreen blocked it → click **More info → Run anyway**.
-* “MSVCP…”/runtime errors → run Windows Update and install vendor CAN drivers.
-
-**macOS**
-
-* “App is from an unidentified developer” → **Right-click → Open** (first launch).
-* If blocked: System Settings → **Privacy & Security** → allow the app.
-
-**Linux**
-
-* “Permission denied” → `chmod +x ./can-tool`.
-* “Address already in use” → another app uses port **8000**. Kill it or change port.
-* SocketCAN: ensure `can0` is **UP** (`ip -details link show can0`) or use `./run.sh can-up`.
-
-**Developers (building the frontend)**
-
-* If you ever see `Cannot find module @rollup/rollup-<platform>` during `vite build`, it’s npm’s optional-deps quirk. Fix locally with:
-
-  ```bash
-  # from frontend/
-  npm ci
-  # then one of:
-  npm i -D @rollup/rollup-linux-x64-gnu@^4
-  npm i -D @rollup/rollup-darwin-arm64@^4
-  npm i -D @rollup/rollup-win32-x64-msvc@^4
-  ```
-
----
-
-## 📦 Packaging Locally (optional, for maintainers)
-
-The CI uses **PyInstaller** with `can-tool.spec`. To build manually:
-
-```bash
-# Build frontend for production
-cd frontend
-npm ci
-npm run build
-cd ..
-
-# Stage frontend assets into backend/static
-mkdir -p backend/static
-cp -r frontend/dist/* backend/static/
-
-# Build the one-file executable
-pip install -U pip pyinstaller -r backend/requirements.txt
-pyinstaller can-tool.spec
-
-# Result appears under: dist/
-```
-
----
-
-## ✅ Support Matrix
-
-* **Windows**: 64-bit, Windows 10/11, vendor CAN drivers required.
-* **macOS**: Apple Silicon (arm64). Use Right-click → Open on first run.
-* **Linux**: x86_64 (built on Ubuntu 24.04 / glibc 2.39). SocketCAN users may need `can-utils`.
-
----
-
+# build a release (tags-only workflow)
+git tag v0.0.5
+git push origin v0.0.5
