@@ -7,6 +7,8 @@ import threading
 import queue
 import subprocess
 import json
+import sys
+import importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
@@ -252,6 +254,67 @@ class _IntrepidBus:
             "frames_total": self.frames_total,
         }
 
+# --- Kvaser backend (Windows) -----------------------------------------------
+# This implements a minimal Kvaser backend via python-can. It expects that
+# Kvaser CANlib drivers are installed on the machine (so that python-can can
+# load canlib32.dll). Channel naming follows "kvaser<N>" where N is an integer.
+class _KvaserBus:
+    def __init__(self):
+        self._bus = None
+        self._last_info = {}
+
+    async def discover_interfaces(self):
+        """
+        Return a small set of candidate channel names the UI can offer.
+        We can't reliably enumerate Kvaser channels portably without extra deps,
+        so provide a few common indices. The user will usually pick kvaser0.
+        """
+        return [f"kvaser{i}" for i in range(4)]
+
+    async def connect(self, channel: str, bitrate: int):
+        """
+        Open a Kvaser channel: interface='kvaser', channel=<index>, bitrate=<bps>.
+        'channel' is expected as 'kvaser0', 'kvaser1', etc.
+        """
+        import can  # python-can
+        try:
+            if not channel.lower().startswith("kvaser"):
+                return False, f"invalid channel name '{channel}'. use 'kvaser0', 'kvaser1', etc."
+            idx = int(channel.replace("kvaser", ""))
+
+            # Close previous if any
+            if self._bus is not None:
+                try:
+                    self._bus.shutdown()
+                except Exception:
+                    pass
+                self._bus = None
+
+            self._bus = can.interface.Bus(
+                interface="kvaser",
+                channel=idx,
+                bitrate=bitrate,
+            )
+            self._last_info = {
+                "backend": "kvaser",
+                "channel": idx,
+                "bitrate": bitrate,
+            }
+            return True, f"connected to {channel} @ {bitrate} bps"
+        except Exception as e:
+            return False, f"Failed to open {channel}: {e}"
+
+    async def disconnect(self):
+        if self._bus is not None:
+            try:
+                self._bus.shutdown()
+            except Exception:
+                pass
+            self._bus = None
+
+    def health_snapshot(self):
+        return dict(self._last_info)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers for SocketCAN discovery (fast & non-blocking for the API thread)
@@ -308,20 +371,39 @@ def _list_socketcan_names() -> List[str]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class BusManager:
-    """
-    Front-end facing manager that hides which backend we're using.
-
-    Key guarantees:
-      - No heavy work in __init__ (app import is instant).
-      - All blocking device ops (.open/.close) are offloaded via asyncio.to_thread.
-      - Thread-safe connect/disconnect via an asyncio.Lock WITHOUT deadlocks.
-    """
     def __init__(self):
-        self._bus: Optional[object] = None
-        self._lock = asyncio.Lock()
-        self._info: Dict[str, Any] = {}
+        self._impl = None
+        self._impl_name = None
 
-    # ---- Discovery -----------------------------------------------------------
+        # Prefer SocketCAN on Linux
+        if sys.platform.startswith("linux"):
+            try:
+                self._impl = _SocketCANBus()
+                self._impl_name = "socketcan"
+            except Exception:
+                pass
+
+        # If Intrepid (ics) is installed, allow that to override on any platform.
+        # We probe for the module without importing it to keep Pylance happy.
+        try:
+            if importlib.util.find_spec("ics") is not None:
+                self._impl = _IntrepidBus()
+                self._impl_name = "intrepid"
+        except Exception:
+            pass
+
+        # On Windows, prefer Kvaser if python-can is present.
+        if sys.platform.startswith("win"):
+            try:
+                if importlib.util.find_spec("can") is not None:
+                    self._impl = _KvaserBus()
+                    self._impl_name = "kvaser"
+            except Exception:
+                # Leave whatever impl we already selected (e.g., Intrepid)
+                pass
+
+
+# ---- Discovery -----------------------------------------------------------
 
     async def discover_interfaces(self) -> List[str]:
         tasks = [
