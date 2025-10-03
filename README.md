@@ -1,224 +1,259 @@
 # CAN Tool
 
-CAN Tool is a combined backend (FastAPI) + frontend (Vite/React) project for working with CAN bus devices (SocketCAN and Intrepid).
-It also includes helpers for managing a CAN interface (`can0`) and running quick hardware tests.
-
----
-## Packaged Executable
-
-For non-technical users, you can download the prebuilt **CAN Tool** binary:
-
-- Windows: `can-tool.exe`
-- Linux: `CAN_Tool-x86_64.AppImage`
-
-### Usage
-1. Double-click the executable
-2. Your browser will open automatically to [http://127.0.0.1:8000](http://127.0.0.1:8000)
-3. Connect to your CAN interface and use the tool
-
-### Notes
-- Make sure your CAN interface drivers are installed
-- Linux users may need `can-utils` and socket permissions (see below)
+CAN Tool is a combined **backend (FastAPI)** + **frontend (Vite/React)** app for working with CAN bus devices (SocketCAN, Intrepid, etc.).  
+It includes helpers for bringing up a CAN interface (e.g., `can0`) and for quick hardware tests.
 
 ---
 
-## Backend Quick Start
+## 🚀 Quick Download (Non-Technical Users)
 
-The backend provides the REST API and WebSocket stream.
+You don’t need to install anything. Download the prebuilt app for **your OS** from GitHub Releases.
 
-### Install dependencies
+### Step-by-step (all platforms)
+
+1) Open the project’s **Releases** page (top bar → **Releases**) and click the **latest version** (looks like `vX.Y.Z`).  
+2) Under **Assets**, download the file for **your OS**:
+   - **Windows** → typically a ZIP named like `can-tool-windows-<tag>.zip`.
+   - **macOS (Apple Silicon)** → a ZIP like `can-tool-macos-<tag>.zip`.  
+     _Note: built for Apple Silicon (arm64)._
+   - **Linux (x86_64)** → a TAR/ZIP like `can-tool-ubuntu-<tag>.tar.gz` (from Ubuntu 24.04, glibc 2.39).
+3) **Extract** the archive (right-click → Extract / “Open archive”).
+4) Inside the extracted folder, run the app:
+   - **Windows**: double-click `can-tool.exe`.
+   - **macOS**: in Finder, **Right-click → Open** on `can-tool` the first time (bypasses Gatekeeper), then click **Open**.
+   - **Linux**: open Terminal in that folder:
+     ```bash
+     chmod +x ./can-tool
+     ./can-tool
+     ```
+5) Your browser will open to **http://127.0.0.1:8000** (the tool’s UI).  
+6) Connect to your CAN interface and use the tool.
+
+### Notes for each OS
+
+- **Windows**
+  - If SmartScreen warns about an unknown publisher: click **More info → Run anyway**.
+  - If a firewall prompt appears: allow access on **Private networks** (localhost only).
+  - Install your adapter’s drivers (Kvaser, Intrepid, etc.).
+
+- **macOS (Apple Silicon)**
+  - First launch: **Right-click → Open** (Gatekeeper) as mentioned above.
+  - If you blocked it accidentally: System Settings → **Privacy & Security** → allow the app.
+
+- **Linux**
+  - Built on **Ubuntu 24.04**. On older distros you may need newer glibc.
+  - To use SocketCAN you may need `can-utils` and interface permissions:
+    ```bash
+    sudo apt update
+    sudo apt install -y can-utils
+    # Example bring-up at 250 kbit/s
+    sudo ip link set can0 type can bitrate 250000
+    sudo ip link set can0 up
+    ```
+  - Or use the helper commands in **run.sh** (see below).
+
+---
+
+## 🏗️ How Releases Are Built (CI)
+
+- Builds are created **only when you push a Git tag** (example: `v0.3.0`).  
+- The GitHub Action compiles the app for **Windows**, **macOS (arm64)**, and **Linux (x86_64)** and attaches the artifacts to that Release.
+
+### Cut a new Release (maintainers)
 
 ```bash
+# 1) Commit all changes on your branch
+git add -A
+git commit -m "Your message"
+
+# 2) Tag with a semver-style tag (this is what triggers the build)
+git tag v0.3.0
+
+# 3) Push the tag to GitHub (this starts the CI build + release)
+git push origin v0.3.0
+````
+
+Then go to **GitHub → Actions** or **Releases** and download the artifacts.
+
+---
+
+## 🧪 Local Development (from source)
+
+### Backend (FastAPI)
+
+**Requirements:** Python 3.12
+
+```bash
+# From repo root
 cd backend
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -U pip
 pip install -r requirements.txt
-```
-
-Make sure you have `uvicorn` installed (comes from `requirements.txt`). If needed:
-
-```bash
-pip install uvicorn[standard] fastapi
-```
-
-### Run backend
-
-```bash
-cd backend
 uvicorn app:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### Verify
+Verify:
 
-* Open [http://localhost:8000/docs](http://localhost:8000/docs) for Swagger API UI
-* Health check: `curl http://localhost:8000/api/health`
+* Swagger UI → [http://localhost:8000/docs](http://localhost:8000/docs)
+* Health → `curl http://localhost:8000/api/health`
 
-Logs: backend writes to `backend/backend.log` when run via `run.sh`.
+### Frontend (Vite + React)
 
----
-
-## Frontend Quick Start
-
-The frontend is a Vite + React app for interacting with the backend.
-
-### Install dependencies
+**Requirements:** Node.js 20
 
 ```bash
 cd frontend
-npm install
-```
-
-### Run frontend (dev mode with hot reload)
-
-```bash
+npm ci
 npm run dev
 ```
 
-### Verify
-
-* Open [http://localhost:5173](http://localhost:5173) in your browser
-
-Logs: frontend writes to `frontend/frontend.log` when run via `run.sh`.
+Open [http://localhost:5173](http://localhost:5173)
 
 ---
 
-## Running Backend + Frontend Together
+## ▶️ Running Backend + Frontend Together (dev helper)
 
-We use a top-level `run.sh` orchestrator script that manages both backend (FastAPI on port **8000**) and frontend (Vite dev server on port **5173**) with simple commands.
-
-### Start both (background)
+`run.sh` manages both backend (port **8000**) and frontend (Vite on **5173**):
 
 ```bash
-./run.sh start
-```
-
-### Stop both
-
-```bash
-./run.sh stop
-```
-
-### Restart both
-
-```bash
+./run.sh start     # start both in background
+./run.sh stop      # stop both
 ./run.sh restart
+./run.sh status    # shows backend/frontend PIDs + CAN status
+./run.sh up        # backend in background, frontend in foreground (Ctrl+C stops both)
 ```
 
-### Status
+**Logs (background runs):**
 
-```bash
-./run.sh status
-```
+* `backend/backend.log`
+* `frontend/frontend.log`
 
-This will show whether backend/frontend are running, their PIDs, and the CAN interface status.
-
-### Dev mode (frontend logs in terminal, Ctrl+C stops both)
-
-```bash
-./run.sh up
-```
-
-This mode starts the backend in the background and runs the frontend (`npm run dev`) in the foreground so you can see build logs and hot-reload messages.
-Press `Ctrl+C` once to stop **both frontend and backend** cleanly.
+**PID files:** `backend.pid`, `frontend.pid`, `candump.pid`
 
 ---
 
-## CAN Interface Integration
-
-This project includes helpers to manage your CAN adapter alongside backend/frontend services.
-
-### CAN Commands
+## 🚌 CAN Interface Helpers
 
 ```bash
-./run.sh can-up       # Load modules and bring up CAN interface at 250000 bps
-./run.sh can-down     # Stop candump (if any) and bring the CAN interface down
-./run.sh can-test     # Bring up (if needed), start candump, send one test frame, show log
+./run.sh can-up       # Load modules and bring up CAN (250000 bps) as can0
+./run.sh can-down     # Stop candump (if any) and bring can0 down
+./run.sh can-test     # Bring up (if needed), run candump, send one test frame, show log
 ```
 
-### Auto-CAN Mode
-
-If you want the CAN interface to automatically come up when you start the tool (and shut down cleanly when you stop):
+**Auto-CAN mode** (start/stop brings CAN up/down automatically):
 
 ```bash
 AUTO_CAN=1 ./run.sh start
 AUTO_CAN=1 ./run.sh stop
+# also works with: AUTO_CAN=1 ./run.sh up
 ```
 
-This also works for `./run.sh up`.
-
-### Status
-
-The `status` command now shows CAN info:
+Quick sanity test:
 
 ```bash
-./run.sh status
-```
-
-Example output:
-
-```
---- Backend ---
-Backend is running (PID=1234)
---- Frontend ---
-Frontend is running (PID=5678).
---- CAN Status ---
-can0             UP             <NOARP,UP,LOWER_UP,ECHO>
-candump: not running
+./run.sh can-up
+./run.sh can-test
+./run.sh can-down
 ```
 
 ---
 
-## Quick Test Workflow
+## 🔌 Ports & URLs
 
-For verifying that your CAN hardware is functional:
-
-```bash
-./run.sh can-up         # bring up CAN at 250k
-./run.sh can-test       # send test frame + log
-./run.sh can-down       # clean shutdown
-```
+* Backend (Uvicorn): **[http://localhost:8000](http://localhost:8000)** (Swagger at `/docs`)
+* Frontend (Vite dev): **[http://localhost:5173](http://localhost:5173)**
+* Packaged app (all-in-one): opens **[http://127.0.0.1:8000](http://127.0.0.1:8000)** automatically
 
 ---
 
-## Notes
-
-* Backend runs with **Uvicorn** → [http://localhost:8000](http://localhost:8000) (Swagger UI at `/docs`)
-* Frontend runs with **Vite** → [http://localhost:5173](http://localhost:5173)
-* Logs for background runs:
-
-  * `backend/backend.log`
-  * `frontend/frontend.log`
-* PID files (managed by `run.sh`):
-
-  * `backend.pid`
-  * `frontend.pid`
-  * `candump.pid`
-
----
-
-## Example API Commands
-
-### Check backend health
+## 🧰 Example API Calls
 
 ```bash
+# Health
 curl http://localhost:8000/api/health
-```
 
-### List interfaces
-
-```bash
+# List interfaces
 curl http://localhost:8000/api/interfaces
-```
 
-### Connect to an interface
-
-```bash
+# Connect to a CAN interface
 curl -X POST http://localhost:8000/api/connect \
      -H "Content-Type: application/json" \
      -d '{"channel":"can0","bitrate":250000}'
+
+# WebSocket stream (example using websocat)
+# websocat ws://localhost:8000/api/stream
 ```
 
-### Start WebSocket stream
+---
+
+## 🧯 Troubleshooting
+
+**Non-technical users**
+
+* Browser didn’t open? Manually visit [http://127.0.0.1:8000](http://127.0.0.1:8000) after starting the app.
+* “Port already in use”? Close other apps using port **8000** and try again.
+
+**Windows**
+
+* SmartScreen blocked it → click **More info → Run anyway**.
+* “MSVCP…”/runtime errors → run Windows Update and install vendor CAN drivers.
+
+**macOS**
+
+* “App is from an unidentified developer” → **Right-click → Open** (first launch).
+* If blocked: System Settings → **Privacy & Security** → allow the app.
+
+**Linux**
+
+* “Permission denied” → `chmod +x ./can-tool`.
+* “Address already in use” → another app uses port **8000**. Kill it or change port.
+* SocketCAN: ensure `can0` is **UP** (`ip -details link show can0`) or use `./run.sh can-up`.
+
+**Developers (building the frontend)**
+
+* If you ever see `Cannot find module @rollup/rollup-<platform>` during `vite build`, it’s npm’s optional-deps quirk. Fix locally with:
+
+  ```bash
+  # from frontend/
+  npm ci
+  # then one of:
+  npm i -D @rollup/rollup-linux-x64-gnu@^4
+  npm i -D @rollup/rollup-darwin-arm64@^4
+  npm i -D @rollup/rollup-win32-x64-msvc@^4
+  ```
+
+---
+
+## 📦 Packaging Locally (optional, for maintainers)
+
+The CI uses **PyInstaller** with `can-tool.spec`. To build manually:
 
 ```bash
-# Example with websocat
-websocat ws://localhost:8000/api/stream
+# Build frontend for production
+cd frontend
+npm ci
+npm run build
+cd ..
+
+# Stage frontend assets into backend/static
+mkdir -p backend/static
+cp -r frontend/dist/* backend/static/
+
+# Build the one-file executable
+pip install -U pip pyinstaller -r backend/requirements.txt
+pyinstaller can-tool.spec
+
+# Result appears under: dist/
 ```
+
+---
+
+## ✅ Support Matrix
+
+* **Windows**: 64-bit, Windows 10/11, vendor CAN drivers required.
+* **macOS**: Apple Silicon (arm64). Use Right-click → Open on first run.
+* **Linux**: x86_64 (built on Ubuntu 24.04 / glibc 2.39). SocketCAN users may need `can-utils`.
+
+---
+
