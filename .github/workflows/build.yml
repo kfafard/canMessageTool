@@ -2,48 +2,83 @@ name: Build CAN Tool
 
 on:
   push:
-    branches:
-      - feature/packaged-executable
+    branches: [ feature/packaged-executable ]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'can-tool.spec'
+      - '.github/workflows/**'
   pull_request:
-    branches:
-      - main
+    branches: [ feature/packaged-executable ]
 
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        py: ['3.12']
 
     runs-on: ${{ matrix.os }}
 
     steps:
+      - name: Checkout
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      # ---------- Frontend build ----------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller fastapi uvicorn[standard] pydantic jinja2
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Build frontend
+        working-directory: frontend
         run: |
-          cd frontend
-          npm ci
+          npm ci || npm install
           npm run build
-          cd ..
+
+      - name: Stage static into backend/static
+        run: |
+          rm -rf backend/static
           mkdir -p backend/static
           cp -r frontend/dist/* backend/static/
 
-      - name: Build executable
-        run: |
-          pyinstaller can-tool.spec
+      # ---------- Python build ----------
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.py }}
 
-      - name: Upload artifact
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          # tolerate missing requirements.txt
+          if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
+          pip install pyinstaller fastapi uvicorn "python-can>=4" jinja2
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --clean --noconfirm can-tool.spec
+
+      # ---------- Package artifacts ----------
+      - name: Package (Windows)
+        if: startsWith(matrix.os, 'windows')
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\can-tool.exe -DestinationPath can-tool-${{ matrix.os }}.zip
+
+      - name: Package (Unix)
+        if: ${{ !startsWith(matrix.os, 'windows') }}
+        run: |
+          tar -C dist -czf can-tool-${{ matrix.os }}.tar.gz can-tool
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: can-tool-${{ matrix.os }}
-          path: dist/can-tool*
+          path: |
+            can-tool-*.zip
+            can-tool-*.tar.gz
+            dist/**
