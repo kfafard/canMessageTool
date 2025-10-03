@@ -1,114 +1,77 @@
 #!/usr/bin/env bash
-# scripts/linux/can_diag.sh
-#
-# PURPOSE:
-#   Collects CAN + environment diagnostics on Linux Mint so we can pinpoint why the app
-#   can't access 'can0' or fails to bring an interface up.
-#
-# WHAT IT DOES:
-#   - Gathers OS + kernel info
-#   - Checks presence/state of CAN interfaces
-#   - Checks required kernel modules
-#   - Verifies CAN tools and 'ip' availability
-#   - Looks for anything already listening on TCP 8000
-#   - (Optionally) creates/starts a virtual CAN 'vcan0' to confirm the stack works
-#   - Captures app binary capabilities (setcap) so the app can manage interfaces
-#   - Bundles results into can-diagnostics.tar.gz for you to attach back
-#
-# SAFE TO RUN:
-#   Uses read-only commands except where noted with 'sudo'. It only *creates/ups* vcan0 if you agree.
-
 set -euo pipefail
 
-OUTDIR="can-diagnostics-$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$OUTDIR"
+# ─────────────────────────────────────────────────────────────────────────────
+# CAN diagnostics collector
+# Writes results to a user cache folder so it won't pollute the Git repo.
+# - OUT_ROOT: ~/.cache/can-tool/diagnostics (or $XDG_CACHE_HOME/can-tool/diagnostics)
+# - OUT_STEM: timestamped folder name, e.g., can-diagnostics-20251003-110719
+# ─────────────────────────────────────────────────────────────────────────────
 
-log() { echo "[can-diag] $*" | tee -a "$OUTDIR/diag.log"; }
+# Resolve output root (Linux cache convention)
+OUT_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/can-tool/diagnostics"
+mkdir -p "$OUT_ROOT"
 
-log "Collecting system information..."
+# Timestamped stem and paths
+STAMP="$(date +'%Y%m%d-%H%M%S')"
+OUT_STEM="can-diagnostics-${STAMP}"
+OUT_DIR="${OUT_ROOT}/${OUT_STEM}"
+OUT_TGZ="${OUT_ROOT}/${OUT_STEM}.tar.gz"
+
+mkdir -p "${OUT_DIR}"
+
+echo "[can-diag] Collecting system information..."
+
+# 1) System & kernel info
 {
-  echo "=== OS ==="
+  echo "==== uname -a ===="
   uname -a || true
   echo
-  echo "=== /etc/os-release ==="
-  cat /etc/os-release || true
-  echo
-  echo "=== Kernel modules (CAN related) ==="
-  lsmod | egrep -i '^(can|can_raw|vcan|slcan|gs_usb|peak_usb|kvaser_usb)\b' || true
-  echo
-  echo "=== iproute2 ==="
-  which ip || true
-  ip -V || true
-  echo
-  echo "=== CAN tools ==="
-  which candump || true
-  candump -h 2>&1 | head -n 5 || true
-} > "$OUTDIR/system.txt"
 
-log "Checking TCP:8000 listeners..."
-{
-  sudo lsof -i TCP:8000 -sTCP:LISTEN -n -P || true
+  echo "==== lsmod | egrep '(^can|_usb|kvaser|peak|slcan)' ===="
+  lsmod | egrep '(^can|_usb|kvaser|peak|slcan)' || true
   echo
-  ss -lntp 2>/dev/null | grep ':8000' || true
-} > "$OUTDIR/port8000.txt"
 
-# Try to locate the app binary in the common place you used
-APP_BIN="./can-tool-linux-v0.0.4"
-if [[ ! -x "$APP_BIN" ]]; then
-  # Also try Downloads fallback
-  if [[ -x "$HOME/Downloads/can-tool-linux-v0.0.4" ]]; then
-    APP_BIN="$HOME/Downloads/can-tool-linux-v0.0.4"
-  fi
-fi
-
-log "Inspecting app binary: $APP_BIN"
-{
-  echo "BIN: $APP_BIN"
-  if [[ -e "$APP_BIN" ]]; then
-    ls -l "$APP_BIN" || true
-    sha256sum "$APP_BIN" || true
-    file "$APP_BIN" || true
-    which getcap >/dev/null 2>&1 && getcap "$APP_BIN" || echo "getcap not available (install: sudo apt install -y libcap2-bin)"
-  else
-    echo "Binary not found at $APP_BIN (skipping capability check)."
-  fi
-} > "$OUTDIR/app-binary.txt"
-
-log "Enumerating network interfaces and CAN state..."
-{
-  echo "=== ip -br link ==="
+  echo "==== ip -br link ===="
   ip -br link || true
   echo
-  echo "=== ip -details link show type can ==="
-  ip -details link show type can || true
-} > "$OUTDIR/net-ifaces.txt"
 
-log "Kernel ring messages for CAN (may show driver attach/usb events)..."
-dmesg --color=never | egrep -i '(\bcan\b|socketcan|gs_usb|peak|kvaser|slcan)' > "$OUTDIR/dmesg-can.txt" || true
+  echo "==== ip -details link show type can (JSON) ===="
+  ip -details -json link show type can 2>/dev/null || true
+  echo
 
-# Ask user if we should create vcan0 to validate the stack quickly
-CREATE_VCAN=${CREATE_VCAN:-yes}  # set CREATE_VCAN=no to skip
-if [[ "${CREATE_VCAN}" == "yes" ]]; then
-  log "Attempting to load CAN modules and create vcan0 (requires sudo)..."
-  {
-    set -x
-    sudo modprobe can || true
-    sudo modprobe can_raw || true
-    sudo modprobe vcan || true
+  echo "==== dmesg | egrep -i 'can|kvaser|gs_usb|peak|slcan' | tail -n 200 ===="
+  dmesg | egrep -i 'can|kvaser|gs_usb|peak|slcan' | tail -n 200 || true
+  echo
+} > "${OUT_DIR}/system.txt"
 
-    if ! ip -br link | grep -q '^vcan0'; then
-      sudo ip link add dev vcan0 type vcan || true
-    fi
-    sudo ip link set up vcan0 || true
-    set +x
+# 2) Port 8000 listeners
+{
+  echo "==== sudo lsof -i TCP:8000 -sTCP:LISTEN -n -P ===="
+  sudo -n true 2>/dev/null || true
+  sudo lsof -i TCP:8000 -sTCP:LISTEN -n -P || true
+} > "${OUT_DIR}/port8000.txt"
 
-    echo
-    echo "=== vcan0 state after bring-up ==="
-    ip -br link show vcan0 || true
-  } > "$OUTDIR/vcan-setup.txt" 2>&1
-else
-  log "Skipping vcan0 creation (CREATE_VCAN=no)."
-fi
+# 3) Network interfaces and CAN state
+{
+  echo "==== ip -details link show ===="
+  ip -details link show || true
+} > "${OUT_DIR}/links.txt"
+
+# 4) Try to prepare vcan0 (harmless on systems without it)
+{
+  echo "==== vcan bring-up attempt ===="
+  sudo modprobe can can_raw vcan 2>&1 || true
+  sudo ip link add dev vcan0 type vcan 2>&1 || true
+  sudo ip link set up dev vcan0 2>&1 || true
+  ip -br link | egrep '^(v?can)[0-9]+' || true
+} > "${OUT_DIR}/vcan_setup.txt"
+
+echo "[can-diag] Packing results at ${OUT_TGZ}..."
+tar -C "${OUT_ROOT}" -czf "${OUT_TGZ}" "${OUT_STEM}"
+echo "[can-diag] Done. Created ${OUT_TGZ}"
+echo
+echo ">>> Attach ${OUT_TGZ} if you need support. <<<"
 
 log "Packing results..."
 tar -czf "${OUTDIR}.tar.gz" "$OUTDIR"
