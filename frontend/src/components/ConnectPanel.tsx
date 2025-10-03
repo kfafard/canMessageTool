@@ -155,8 +155,8 @@ export default function ConnectPanel({
             Disconnect
           </button>
         ) : (
-          <button className="btn-primary" onClick={() => onConnect()}>
-            Connect
+          <button className="btn" disabled={busy} onClick={bringUp}>
+            {busy ? "Bringing up…" : `Bring up ${chan} (${chan.startsWith("vcan") ? "no bitrate" : BITRATE.toLocaleString() + " bps"})`}
           </button>
         )}
       </div>

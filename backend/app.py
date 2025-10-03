@@ -4,6 +4,9 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import re
+import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -12,6 +15,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi import HTTPException
+from pydantic import BaseModel 
 from paths import ensure_user_file
 from auto_setup import ensure_can_environment, log_env_summary
 
@@ -33,6 +38,35 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------- Privileged runner and link helpers ----------------
+
+def _run_priv(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
+    """
+    Run a privileged netlink command. We try directly first (works if the Linux
+    binary has cap_net_admin/cap_net_raw). If that fails for permissions and
+    pkexec is available, we transparently retry with pkexec (GUI password).
+    """
+    try:
+        return subprocess.run(cmd, text=True, capture_output=True, check=check)
+    except subprocess.CalledProcessError as e:
+        # If permission problem, try pkexec if present
+        if ("Operation not permitted" in (e.stderr or "") or e.returncode in (1, 126)) and shutil.which("pkexec"):
+            return subprocess.run(["pkexec", *cmd], text=True, capture_output=True, check=check)
+        raise
+    except PermissionError:
+        if shutil.which("pkexec"):
+            return subprocess.run(["pkexec", *cmd], text=True, capture_output=True, check=check)
+        raise
+
+def _ip_exists(iface: str) -> bool:
+    r = subprocess.run(["ip", "-br", "link", "show", iface], text=True, capture_output=True)
+    return r.returncode == 0
+
+def _ip_details(iface: str) -> str:
+    r = subprocess.run(["ip", "-br", "link", "show", iface], text=True, capture_output=True)
+    return (r.stdout or r.stderr or "").strip()
+
 
 # -----------------------------------------------------------------------------
 # Paths for data files
@@ -143,59 +177,66 @@ async def send(req: SendRequest):
 # ----------------------------- CAN bring-up (Linux) --------------------------
 
 @app.get("/api/can/status")
-async def can_status(iface: str = "can0"):
-    """
-    Returns a compact 'ip -brief link show dev <iface>' line so the UI can
-    infer UP/DOWN. Safe to call even if iface doesn't exist.
-    """
-    iface = _safe_iface(iface)
-    ip = _which_any("ip")
-    try:
-        proc = subprocess.run(
-            [ip, "-brief", "link", "show", "dev", iface],
-            capture_output=True, text=True, timeout=3
-        )
-        out = (proc.stdout or proc.stderr or "").strip()
-        ok = proc.returncode == 0
-        return {"iface": iface, "ok": ok, "output": out}
-    except Exception as e:
-        return {"iface": iface, "ok": False, "output": f"error: {e}"}
+def api_can_status(iface: str):
+    if not sys.platform.startswith("linux"):
+        # Keep behavior consistent; Windows brings up Kvaser via python-can, not iproute
+        return {"iface": iface, "ok": True, "output": "status not applicable on this OS"}
+    exists = _ip_exists(iface)
+    return {"iface": iface, "ok": exists, "output": _ip_details(iface) if exists else f"{iface}: not present"}
+
+class BringUpReq(BaseModel):
+    iface: str
+    bitrate: Optional[int] = 250000  # ignored for vcan*
 
 @app.post("/api/can/bringup")
-async def can_bringup(
-    payload: Dict[str, Any] = Body(..., example={"iface": "can0", "bitrate": 250000})
-):
-    iface = _safe_iface(str(payload.get("iface", "can0")))
-    bitrate = _safe_bitrate(int(payload.get("bitrate", 250000)))
+def api_can_bringup(req: BringUpReq):
+    if not sys.platform.startswith("linux"):
+        raise HTTPException(status_code=400, detail="Bring-up only supported on Linux.")
 
-    # Try to load modules (non-privileged; harmless if already loaded)
-    modprobe = _which_any("modprobe")
-    for mod in ("kvaser_usb", "can", "can_raw"):
-        subprocess.run([modprobe, mod], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    iface = req.iface.strip()
+    bitrate = int(req.bitrate or 250000)
 
-    # pkexec for elevation with GUI prompt
-    pk = shutil.which("pkexec")
-    if not pk:
-        raise HTTPException(
-            status_code=500,
-            detail="pkexec (PolicyKit) not found. Install polkit or run the command manually with sudo."
-        )
+    # Load base CAN modules; ignore if already loaded
+    for mod in ("can", "can_raw"):
+        try:
+            _run_priv(["modprobe", mod], check=False)
+        except Exception:
+            pass
 
-    ip = _which_any("ip")
-    cmd = f"{ip} link set {iface} up type can bitrate {bitrate}"
+    # Snapshot before, for debugging in UI
+    exists = _ip_exists(iface)
+    before = _ip_details(iface) if exists else f"{iface}: (not present)"
+
     try:
-        res = subprocess.run([pk, "bash", "-lc", cmd],
-                             capture_output=True, text=True, timeout=60)
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=500, detail="Timed out waiting for pkexec approval.")
+        if iface.startswith("vcan"):
+            # Create vcanX if missing (ignore race "File exists")
+            if not exists:
+                try:
+                    _run_priv(["ip", "link", "add", "dev", iface, "type", "vcan"], check=True)
+                except subprocess.CalledProcessError as e:
+                    if "File exists" not in (e.stderr or ""):
+                        raise
+            # Ensure it's UP (no bitrate on vcan)
+            _run_priv(["ip", "link", "set", iface, "up"], check=True)
+            final = _ip_details(iface)
+            return {"ok": True, "iface": iface, "bitrate": None, "before": before, "output": final}
 
-    if res.returncode != 0:
-        msg = (res.stderr or res.stdout or "Unknown error").strip()
-        if "dismissed authentication" in msg.lower():
-            raise HTTPException(status_code=400, detail="Cancelled by user.")
+        # Physical SocketCAN device: DOWN -> type can bitrate -> UP
+        # Bring it down first (ignore error if it's already down)
+        _run_priv(["ip", "link", "set", iface, "down"], check=False)
+        # Configure bitrate/type (this is what fails if you try it on vcan or while UP)
+        _run_priv(["ip", "link", "set", iface, "type", "can", "bitrate", str(bitrate)], check=True)
+        # Bring it up
+        _run_priv(["ip", "link", "set", iface, "up"], check=True)
+
+    except subprocess.CalledProcessError as e:
+        # Convert iproute2 errors to a clean message for the toast
+        msg = (e.stderr or e.stdout or str(e)).strip()
         raise HTTPException(status_code=500, detail=f"pkexec failed: {msg}")
 
-    return {"ok": True, "iface": iface, "bitrate": bitrate}
+    final = _ip_details(iface)
+    return {"ok": True, "iface": iface, "bitrate": bitrate, "before": before, "output": final}
+
 
 # ----------------------------- Presets / Groups ------------------------------
 
