@@ -1,64 +1,74 @@
-name: Build CAN Tool
+name: CAN Tool – Build & (optional) Release
 
 on:
+  workflow_dispatch:
   push:
-    branches: [ feature/packaged-executable ]
-    paths:
-      - 'backend/**'
-      - 'frontend/**'
-      - 'can-tool.spec'
-      - '.github/workflows/**'
+    branches: [ main, feature/packaged-executable ]
+    tags:
+      - 'v*'        # push a tag like v1.2.3 to create a release
   pull_request:
-    branches: [ feature/packaged-executable ]
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        py: ['3.12']
-
-    runs-on: ${{ matrix.os }}
+        os: [ubuntu-22.04, windows-latest, macos-13]  # macOS Intel; add macos-latest if you want Apple Silicon runners
 
     steps:
       - name: Checkout
-      - uses: actions/checkout@v4
+        uses: actions/checkout@v4
 
-      # ---------- Frontend build ----------
-      - name: Setup Node.js
+      # ---------- Frontend ----------
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Build frontend
+      - name: Install & build frontend
         working-directory: frontend
         run: |
           npm ci || npm install
           npm run build
 
-      - name: Stage static into backend/static
+      - name: Stage built frontend into backend/static
         run: |
           rm -rf backend/static
           mkdir -p backend/static
           cp -r frontend/dist/* backend/static/
 
-      # ---------- Python build ----------
+      # ---------- Backend / PyInstaller ----------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.py }}
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: |
+            backend/requirements.txt
+            can-tool.spec
 
-      - name: Install Python deps
+      - name: Install backend deps
         run: |
           python -m pip install --upgrade pip
-          # tolerate missing requirements.txt
-          if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
-          pip install pyinstaller fastapi uvicorn "python-can>=4" jinja2
+          if [ -f backend/requirements.txt ]; then
+            pip install -r backend/requirements.txt
+          else
+            pip install fastapi "uvicorn[standard]" pyinstaller python-can pydantic jinja2
+          fi
 
-      - name: Build with PyInstaller
+      - name: Build executable with PyInstaller
         run: |
           pyinstaller --clean --noconfirm can-tool.spec
 
@@ -67,14 +77,16 @@ jobs:
         if: startsWith(matrix.os, 'windows')
         shell: pwsh
         run: |
-          Compress-Archive -Path dist\can-tool.exe -DestinationPath can-tool-${{ matrix.os }}.zip
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item dist\can-tool.exe package\
+          Compress-Archive -Path package\* -DestinationPath can-tool-${{ matrix.os }}.zip
 
       - name: Package (Unix)
         if: ${{ !startsWith(matrix.os, 'windows') }}
         run: |
           tar -C dist -czf can-tool-${{ matrix.os }}.tar.gz can-tool
 
-      - name: Upload artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: can-tool-${{ matrix.os }}
@@ -82,3 +94,25 @@ jobs:
             can-tool-*.zip
             can-tool-*.tar.gz
             dist/**
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write   # required to create a release
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/**/can-tool-*.zip
+            artifacts/**/can-tool-*.tar.gz
