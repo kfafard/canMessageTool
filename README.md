@@ -1,138 +1,238 @@
 # CAN Tool
 
-A combined backend (FastAPI) + frontend (Vite/React) app for working with CAN bus devices.
+A simple, bundled **backend (FastAPI)** + **frontend (Vite/React)** app for working with CAN bus on:
 
-- **Windows 11 (Kvaser)**: Uses Kvaser CANlib via python-can.
-- **Linux Mint (SocketCAN)**: Uses native SocketCAN (can0) and can auto-bring-up the interface using `pkexec`.
+* **Linux Mint** via **SocketCAN** (real adapters or virtual `vcan`).
+* **Windows 10/11** via **Kvaser CANlib** (python-can “kvaser” backend).
 
----
-
-## Download (prebuilt)
-
-Go to the Releases page and download:
-
-- **Windows**: `can-tool-windows-<tag>.exe`
-- **Linux Mint**: `can-tool-linux-<tag>`
-
-> Replace `<tag>` with the release you want (e.g. `v0.0.5`).
+The app bundles everything into a single executable per OS. When you start it, your browser opens to **[http://127.0.0.1:8000](http://127.0.0.1:8000)**.
 
 ---
 
-## Non-technical quick start
+## Quick downloads (non-technical users)
 
-### Windows 11 (Kvaser)
+1. Go to the **GitHub Releases** page of this repo.
+2. Download the file for your OS:
 
-1. Install **Kvaser CANlib drivers** (required for Kvaser hardware).
-2. Double-click `can-tool-windows-<tag>.exe`.
-3. Your browser opens at **http://127.0.0.1:8000**.
-4. In **Interface**, pick **kvaser0** (use kvaser1 if you have multiple).
-5. Click **Connect** and start using the tool.
+   * **Windows:** `can-tool-windows-vX.Y.Z.exe`
+   * **Linux Mint:** `can-tool-linux-vX.Y.Z`
+3. Follow the platform guide below.
 
-**Notes**
-- “Bring up” is not needed on Windows/Kvaser.
-- If it won’t connect, check **Kvaser Device Guide** and your drivers.
+> Tip: Each tag `vX.Y.Z` automatically builds and attaches the latest executables.
 
-### Linux Mint (SocketCAN)
+---
 
-1. Make the file executable (first time only), then run it:
-   ```bash
-   chmod +x can-tool-linux-<tag>
-   ./can-tool-linux-<tag>
+## Windows 10/11 (Kvaser) — non-technical guide
 
-    Your browser opens at http://127.0.0.1:8000
+**Prerequisites**
 
-    .
+* Install **Kvaser CANlib drivers** (from Kvaser). Plug in your Kvaser adapter.
 
-    In Interface, pick can0 (or vcan0 for virtual testing).
+**Run the tool**
 
-    Click Bring up can0 (250,000 bps).
+1. Double-click `can-tool-windows-vX.Y.Z.exe`.
+2. Your browser should open to **[http://127.0.0.1:8000](http://127.0.0.1:8000)**.
+3. **Interface**: pick `kvaser0` (or `kvaser1` if you have more than one).
+4. Click **Connect**. (There’s no “Bring up” on Windows; bitrate is set through CANlib.)
+5. Use **Presets** (right panel) or the **Message Builder** to transmit frames.
 
-        A pkexec password prompt may appear to allow ip link commands.
+**Troubleshooting**
 
-    Click Connect and start using the tool.
+* *No Kvaser interfaces*: install Kvaser CANlib and replug the adapter.
+* *Windows Defender SmartScreen*: click **More info → Run anyway** (you built this 🙂
 
-Notes
+---
 
-    Avoid prompts by granting capabilities once:
+## Linux Mint (SocketCAN) — non-technical guide
 
-sudo apt install -y libcap2-bin
-sudo setcap 'cap_net_raw,cap_net_admin+eip' ./can-tool-linux-<tag>
+**Prerequisites (one-time)**
 
-If port 8000 is “busy”:
+Open Terminal and run:
 
-    sudo lsof -i TCP:8000 -sTCP:LISTEN -n -P
-    kill -9 <PID>
+```bash
+sudo apt update
+sudo apt install -y can-utils libcap2-bin
+```
 
-Developer quick start (optional)
-Backend
+**Run the tool**
 
+```bash
+# In the folder where you downloaded it
+chmod +x can-tool-linux-vX.Y.Z
+./can-tool-linux-vX.Y.Z
+```
+
+The app opens **[http://127.0.0.1:8000](http://127.0.0.1:8000)**.
+
+**Choose an interface**
+
+* **Virtual** testing: select `vcan0`.
+* **Real hardware**: select your device (often `can0` for USB adapters).
+
+**Bring the link up (Linux only)**
+
+1. Click **Bring up** (sets bitrate for `can*` or creates/ups `vcan*`).
+
+   * For `can*`: the backend does `down → type can bitrate 250000 → up`.
+   * For `vcan*`: it creates `vcan0` if missing and brings it up (no bitrate).
+   * It will use privileges automatically; if needed you’ll see a password prompt.
+
+2. Click **Connect**.
+
+**Optional (avoid password prompts)**
+Grant the binary CAN capabilities once:
+
+```bash
+sudo setcap 'cap_net_raw,cap_net_admin+eip' ./can-tool-linux-vX.Y.Z
+getcap ./can-tool-linux-vX.Y.Z
+# expect: ./can-tool-linux-vX.Y.Z cap_net_admin,cap_net_raw=eip
+```
+
+**Troubleshooting**
+
+* **Port 8000 already in use**
+
+  ```bash
+  sudo lsof -i TCP:8000 -sTCP:LISTEN -n -P
+  kill -9 <PID_SHOWN>
+  ```
+* **“RTNETLINK answers: Device or resource busy”**
+  You tried to set bitrate while the link was up or it’s `vcan`.
+  Click **Bring up** again (the tool now forces **down → set type/bitrate → up** for `can*` and skips bitrate on `vcan*`).
+* **“Could not access SocketCAN device can0 (No such device)”**
+  Your adapter isn’t exposed as `can0`. Check:
+
+  ```bash
+  ip -br link | grep -E '^(v?can)'
+  dmesg | grep -i can
+  ```
+* **Diagnostics bundle** (optional):
+  `scripts/linux/can_diag.sh` collects logs into a tar.gz you can share.
+
+---
+
+## What’s inside / how it works
+
+* **Backend**: `backend/app.py` (FastAPI).
+
+  * Serves the UI and provides `/api/*`.
+  * Linux-only **bring-up** endpoint `/api/can/bringup`:
+
+    * `vcan*`: create if missing, then `ip link set <iface> up`.
+    * `can*`: `ip link set <iface> down` → `type can bitrate <bps>` → `up`.
+      Uses direct `ip` if the binary has `cap_net_admin`; otherwise falls back to `pkexec` for a GUI elevation prompt.
+  * Streams frames over `/api/stream`.
+  * Stores user **presets** and **groups** in your user profile (see `/api/config-paths`).
+
+* **CAN backends**
+
+  * **Linux**: SocketCAN via `python-can` (loopback enabled so self-test echoes on `vcan`).
+  * **Windows**: Kvaser via `python-can`’s `kvaser` interface (requires CANlib).
+  * (Optional) Intrepid `icsneopy` support exists but we’re focusing on Windows+Mint now.
+
+* **Frontend**: Vite/React in `frontend/` (compiled assets are served by the backend).
+
+---
+
+## Developer quick start
+
+### Backend (dev)
+
+```bash
 cd backend
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn app:app --reload --host 0.0.0.0 --port 8000
+# API docs: http://localhost:8000/docs
+```
 
-Frontend
+### Frontend (dev)
 
+```bash
 cd frontend
 npm ci
 npm run dev
+# App: http://localhost:5173  (talks to backend on :8000)
+```
 
-Open http://localhost:5173
+### Build the bundled executables locally
 
-in your browser.
-CAN helpers (Linux)
-
-The app exposes:
-
-    GET /api/interfaces – list candidate interfaces
-
-    GET /api/can/status?iface=can0 – show current link state
-
-    POST /api/can/bringup – perform SocketCAN bring-up (uses pkexec if needed)
-
-Building a release (tags-only)
-
-# from the repo root
-git add .
-git commit -m "Win (Kvaser) support; Linux bring-up UX; docs"
-git tag v0.0.5
-git push origin v0.0.5
-
-The CI workflow publishes:
-
-    can-tool-windows-<tag>.exe
-
-    can-tool-linux-<tag>
-
-to the GitHub Release.
-
-
-**Why:** Keeps the docs focused on the two platforms we care about, with a non-technical path for each.
-
----
-
-## what changed, why, and what it fixes (quick)
-
-- **Error we saw (Linux):** `address already in use` on port **8000** → caused by a previous `can-tool` still running.  
-  **Fix:** kill PID; no code changes needed.
-
-- **Error we saw (Linux):** `No such device can0` → interface not brought up.  
-  **Fix in product:** “Bring up” button calls `/api/can/bringup` (with sudo via `pkexec` if needed).
-
-- **Windows couldn’t “bring up”** → because Windows has **no SocketCAN**.  
-  **Fix in product:** add **Kvaser backend** via `python-can` and **hide the Bring Up button** on Windows.  
-  Users select `kvaser0` and click **Connect**.
-
----
-
-## after you paste these in
+> CI handles this for releases (see below). For manual builds:
 
 ```bash
-# from repo root
-git checkout -b feat/kvaser-and-linux-ux
-git add backend/requirements.txt backend/bus.py backend/app.py frontend/src/components/ConnectPanel.tsx README.md
-git commit -m "Windows Kvaser support + Linux socketcan bring-up UX; docs"
-git push -u origin feat/kvaser-and-linux-ux
+# 1) Frontend build → copy into backend/static
+cd frontend && npm ci && npm run build
+mkdir -p ../backend/static && cp -r dist/* ../backend/static/
 
-# build a release (tags-only workflow)
-git tag v0.0.5
-git push origin v0.0.5
+# 2) Backend bundle
+cd ../backend
+pip install -r requirements.txt
+pip install pyinstaller
+pyinstaller can-tool.spec
+# Output in dist/ (Windows: can-tool.exe, Linux: can-tool)
+```
+
+---
+
+## CI/CD (GitHub Actions)
+
+* Workflow: `.github/workflows/build-and-release.yml`
+* **Trigger:** When you push a **tag** matching `v*` (e.g., `v0.0.6`) or run it manually.
+* **Matrix:** **ubuntu-latest** and **windows-latest** (macOS disabled).
+* **Outputs:** Attaches:
+
+  * `can-tool-linux-vX.Y.Z`
+  * `can-tool-windows-vX.Y.Z.exe`
+
+**Tag & push to release:**
+
+```bash
+# from your main branch
+git pull
+git tag v0.0.6
+git push origin v0.0.6
+```
+
+The workflow builds both executables, uploads them as artifacts, and publishes a GitHub Release for that tag.
+
+---
+
+## API snippets
+
+* Health:
+  `curl http://127.0.0.1:8000/api/health`
+* List interfaces:
+  `curl http://127.0.0.1:8000/api/interfaces`
+* Bring up (Linux):
+  `curl -X POST http://127.0.0.1:8000/api/can/bringup -H 'Content-Type: application/json' -d '{"iface":"can0","bitrate":250000}'`
+* WebSocket stream: `ws://127.0.0.1:8000/api/stream`
+
+---
+
+## Known limitations
+
+* Windows supports **Kvaser** adapters via CANlib. Other Windows adapters are not configured here.
+* Linux bring-up requires either:
+
+  * one-time `setcap` (recommended), **or**
+  * a pkexec password prompt when you press **Bring up**.
+
+---
+
+## Support
+
+If something doesn’t work:
+
+1. Include your OS, adapter type, and the error popup text.
+2. On Linux, attach the diagnostics bundle:
+
+   ```bash
+   scripts/linux/can_diag.sh
+   ```
+3. If port 8000 is stuck, show:
+
+   ```bash
+   sudo lsof -i TCP:8000 -sTCP:LISTEN -n -P
+   ```
+
+Thanks!
