@@ -1,102 +1,110 @@
 name: Build & Release CAN Tool
 
 on:
+  # Run on tags like v1.2.3, and allow manual runs.
   push:
-    branches:
-      - "**"             # build on any branch push (you can restrict to specific branches)
     tags:
-      - "v*"             # publish a release when pushing tags like v1.0.0
-
-concurrency:
-  group: build-${{ github.ref }}-${{ github.workflow }}
-  cancel-in-progress: true
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
+      # 1) Check out code
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Node
+      # 2) Setup Node 20 + npm cache based on the frontend lockfile
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "npm"
+          node-version: 20
+          cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Set up Python
+      # 3) Setup Python 3.12 (for PyInstaller build)
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-          cache: "pip"
+          python-version: '3.12'
+          cache: 'pip'
 
-      - name: Install Python deps
-        shell: bash
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller fastapi "uvicorn[standard]" pydantic jinja2
+      # 4) Install frontend deps deterministically
+      - name: npm ci (frontend)
+        working-directory: frontend
+        run: npm ci
 
-      - name: Build frontend
+      # 5) Ensure Rollup has the correct native binary for this OS
+      #    This fixes the "Cannot find module @rollup/rollup-<platform>" error.
+      - name: Ensure Rollup native binary for this OS
         shell: bash
+        working-directory: frontend
         run: |
-          cd frontend
-          npm ci
-          # --- Rollup native binary fix START ---
-          # Context: npm sometimes fails to install optional OS-specific Rollup
-          # binaries on Windows/macOS when using `npm ci`, which breaks Vite's build
-          # with: `Cannot find module @rollup/rollup-<platform>`.
-          # Workaround: install the correct optional Rollup package *without* saving
-          # it to package.json, but only on Windows or macOS runners.
-          case "$RUNNER_OS" in
+          set -euo pipefail
+          case "${{ runner.os }}" in
             Windows)
-              npm i --no-save @rollup/rollup-win32-x64-msvc ;;
+              npm i -D @rollup/rollup-win32-x64-msvc@^4
+              ;;
             macOS)
-              npm i --no-save @rollup/rollup-darwin-arm64 || npm i --no-save @rollup/rollup-darwin-x64 ;;
+              npm i -D @rollup/rollup-darwin-arm64@^4
+              ;;
             Linux)
-              # Linux selects the correct binary already; nothing to do.
+              npm i -D @rollup/rollup-linux-x64-gnu@^4
               ;;
           esac
-          # --- Rollup native binary fix END ---
-          npm run build
-          cd ..
+
+      # 6) Build the frontend (Vite)
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      # 7) Copy built frontend into backend/static for packaging
+      - name: Stage frontend assets into backend/static
+        shell: bash
+        run: |
           mkdir -p backend/static
           cp -r frontend/dist/* backend/static/
 
-      - name: Build executable (PyInstaller)
-        shell: bash
+      # 8) Install backend deps and PyInstaller
+      - name: Install backend deps
         run: |
-          pyinstaller can-tool.spec
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pyinstaller
 
-      - name: Upload artifact
+      # 9) Build the executable with PyInstaller spec
+      - name: PyInstaller build
+        run: pyinstaller can-tool.spec
+
+      # 10) Upload the per-OS build output as artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: can-tool-${{ matrix.os }}-${{ github.sha }}
           path: dist/*
           if-no-files-found: error
-          retention-days: 14
 
   release:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-
     steps:
+      # 11) Download all artifacts from the matrix builds
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: ./dist-all
+          path: ./dist
 
+      # 12) Create (or update) a GitHub Release for the pushed tag and attach the files
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ./dist-all/**/*     # upload all platform builds
+          files: ./dist/**/*  # upload everything we just downloaded
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
